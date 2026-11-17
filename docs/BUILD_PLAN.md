@@ -1,6 +1,6 @@
 # Mosaic — Build Plan
 
-**Doc version:** v0.3 (working draft, 2026-11-16) — previous: `docs/archive/BUILD_PLAN_v0.2.md`
+**Doc version:** v0.4 (working draft, 2026-11-16) — previous: `docs/archive/BUILD_PLAN_v0.3.md`
 **Read first:** `CLAUDE.md`, then `docs/SPEC.md`.
 
 ## How to use this plan
@@ -103,11 +103,12 @@ Seth checkpoint (~30 minutes, steps in `docs/ROUTING_TEST.md`)
    transport plays? (effect build vs instrument build)
 5. Fill in `docs/ROUTING_RESULTS.md` (or just tell Claude Code the results and it fills it in).
 
-Decision gate — after results, Claude Code proposes and Seth approves:
-- Plugin category (effect, instrument, or both).
-- Whether Send is the primary live transport in Live and Logic (expected: yes).
-- Any host-specific setup notes for the user manual.
-- SPEC section 5 updated to match reality (bump the SPEC version; archive the old one).
+Decision gate — **done 2026-11-16, approved by Seth** (`docs/ROUTING_RESULTS.md`):
+- Plugin category: **audio effect**, one binary. Logic: Mosaic instance on an Aux strip.
+- Send **is** the primary live transport in Live and Logic. Native buses: 2 / 2 / 8.
+- Look-behind: 2 × host block size, min 256, recomputed on `prepareToPlay`.
+- SPEC updated to v0.4. Still to measure at the M5 checkpoint: the Logic Aux placement
+  and each host's "smallest look-behind" readout.
 
 ---
 
@@ -240,7 +241,8 @@ Decision gate
 Tasks
 1. `InputBusSlotSource` (native buses) and `SendSlotSource` (hub), behind `SlotSource`.
 2. Harden the hub to the SPEC 5.3 requirements: discontinuities, collisions, removal of
-   a Send mid-playback, latency reported only when a Send source is in use.
+   a Send mid-playback, latency reported only when a Send source is in use. Latency
+   rule from the M1 gate: 2 × block size, min 256, recomputed on `prepareToPlay`.
 3. Per-slot Source selector (File / Input N / Send N). Mixed File + Live slots.
 4. Send-role UI (tiny) with connection status and collision warning.
 5. Level meters on live slots.
@@ -257,6 +259,9 @@ Seth checkpoint
 1. In each DAW: route 8 tracks in (per the M1 results), press play, confirm switching is
    tight to the grid by ear and by recording the output and looking at the tile edges.
 2. Bounce offline in each DAW and compare with what you heard.
+3. Left over from M1: in Logic, confirm the Mosaic instance keeps running on an Aux
+   channel strip with the transport playing. In each DAW, read the probe's "smallest
+   look-behind with no underruns" at buffer 64 and 2048 so the 2× rule can be checked.
 
 ---
 
@@ -334,6 +339,8 @@ Work one milestone at a time and stop at each "Seth checkpoint" with a numbered
 
 ## Change log
 
+- **v0.4 — 2026-11-16** — M1 decision gate recorded; M5 inherits the latency rule and the
+  two leftover measurements.
 - **v0.3 — 2026-11-16** — M1 task 3 now measures Send/Mosaic timeline skew. M0 done
   (tag v0.1).
 - **v0.2 — 2026-11-16** — Added M4 (key detection and snap-to-key); later milestones

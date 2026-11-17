@@ -1,6 +1,6 @@
 # Mosaic — Product & Technical Spec
 
-**Doc version:** v0.3 (working draft, 2026-11-16) — previous: `docs/archive/SPEC_v0.2.md`
+**Doc version:** v0.4 (working draft, 2026-11-16) — previous: `docs/archive/SPEC_v0.3.md`
 **Owner:** Seth Richardson / Richardson Media Solutions LLC
 **Repo:** https://github.com/sethrichar/mosaic.git
 **Companion docs:** `CLAUDE.md` (rules for Claude Code), `docs/BUILD_PLAN.md` (milestones)
@@ -182,15 +182,15 @@ AUv2) lets a plugin publish as many input buses as it wants, and JUCE generates 
 buses automatically from `BusesProperties` for both AU and VST3. The plugin side is easy.
 What matters is how many of those buses each DAW will actually connect:
 
-| Host | What it will feed a plugin | Source |
+| Host | What it actually feeds (measured, M1, 2026-11-16) | How |
 |---|---|---|
-| Reaper | Any number of channels/buses via track channels + pin connector | Widely confirmed |
-| Logic Pro | Main input + **one** sidechain, however many buses the AU publishes | SonoBus dev, JUCE forum |
-| Ableton Live | Main input + sidechain. Reports that a third input bus is listed in routing but never receives audio | iPlug2 forum (Live 10); **unverified for Live 12** |
+| Reaper | All 8 stereo buses | Track channels set to 16, plugin pin connector |
+| Logic Pro | Main input + **one** sidechain (Input 1 and 2) | Plugin header Side Chain menu |
+| Ableton Live 12 | Main input + **one** sidechain (Input 1 and 2), VST3 and AU | Device sidechain "Audio From" |
 
-So native multi-bus input alone cannot deliver "8 live sources" in Live or Logic.
-This is the single biggest technical risk in the project and is tested first
-(Build Plan M1).
+So native multi-bus input alone cannot deliver "8 live sources" in Live or Logic. The
+M1 routing spike measured this (`docs/ROUTING_RESULTS.md`) and confirmed the Send design
+below works in all three hosts.
 
 ### 5.2 The design: two transports behind one interface
 
@@ -209,6 +209,9 @@ Every slot reads audio through a `SlotSource` interface. Two live implementation
 - Send instances write their audio into a process-wide hub (a singleton shared by all
   Mosaic instances loaded in the DAW process). The Mosaic-role instance in the same
   Group reads from it.
+- **Measured (M1):** all 8 Sends reach one Mosaic instance in Live, Logic and Reaper,
+  and the null test (5.4) cancels in real time at buffers 64/512/2048 and in an offline
+  bounce, with a 2048-sample look-behind. Send is the primary live transport.
 - Works in any host that loads all instances in one process: Live, Logic (AUv2),
   Reaper with default settings. Does **not** work where instances are sandboxed in
   separate processes (Bitwig; Reaper if "run as dedicated process" is enabled; AUv3) —
@@ -233,13 +236,19 @@ The implementation is Claude Code's to design, but it must meet these:
    delay compensation puts the output back on the grid.
    **`L` must be measured, not assumed.** Once Mosaic reports latency, a host's delay
    compensation may process the Mosaic track *ahead* of the Send track by up to `L`, so
-   the receiver could ask for samples the Send has not written yet. M1 measures the
-   actual timeline skew between Send writes and Mosaic reads in each host (including
-   under PDC and at the largest buffer size) and sizes `L` from that, with headroom.
+   the receiver could ask for samples the Send has not written yet.
+   **Decided (M1):** `L = 2 × the host block size from prepareToPlay`, never below 256
+   samples, recomputed on every `prepareToPlay`. The probe build showed 2048 is enough at
+   every buffer size up to 2048 in all three hosts; the measured floor per host is read
+   from the probe's "smallest look-behind" readout at the M5 checkpoint, and the factor
+   is raised if any host needs more than 2× its block.
 3. **Sample-accurate.** A null test (section 5.4) must cancel completely.
 4. **Graceful discontinuities.** Loop wrap, locate, tempo change, a Send instance being
    removed or bypassed: at worst a short faded gap, never a click, glitch loop, or stale
-   audio. A Send with no fresh data reads as silence.
+   audio. A Send with no fresh data reads as silence. The hub tracks a valid region
+   `[tail, head)`; a discontinuity on the Send side moves `tail`, so audio from before a
+   locate or loop wrap is never returned.
+   Sends transmit only while the transport is playing (4.1).
 5. **Collision handling.** Two Send instances on the same Group + number: last one wins,
    and both UIs show a clear warning.
 6. **Latency only when used.** If no slot uses a Send source, reported latency is 0.
@@ -372,9 +381,16 @@ the file is moved to the target's signature and that is accepted for v1.
 - Licence posture: proprietary / all rights reserved, same as Clear Space. Third-party
   code must be under a permissive licence (see `CLAUDE.md`).
 - Formats: VST3, AU (v2), Standalone. macOS universal binary (arm64 + x86_64).
-- Plugin category: decided by the M1 spike. An audio effect is the natural fit for live
-  switching, but some hosts stop calling effects on tracks with no audio, which would
-  break file-only use. If so, ship as an instrument with audio inputs, or ship both.
+- **Plugin category: audio effect** (AU `aufx`, VST3 `Fx`), one identity, one binary.
+  Decided at the M1 gate. The Send hub is a per-binary singleton, so a second
+  (instrument) binary would split it; one binary keeps Sends reaching every Mosaic.
+- **Logic placement rule.** Logic does not process audio effects on an audio track that
+  has no regions playing (measured, M1). Send instances are unaffected (their tracks have
+  audio). The Mosaic-role instance must sit on an **Aux channel strip** (or in the audio
+  FX slot of an instrument track), which Logic processes continuously. Live and Reaper
+  keep processing effects on empty tracks. Goes in the user guide and the help overlay.
+  If the Aux placement turns out not to work, the fallback is a shared-memory hub
+  (`shm_open`) so an instrument build can be shipped alongside the effect.
 
 ## 9. UI (v1)
 
@@ -451,9 +467,14 @@ Not to be built until v1 ships. Listed so ideas have a home.
 | 7 | Global Key defaults to Auto (first pitched file sets it)? | Yes |
 | 8 | New files default to Snap when detection is confident? | Yes |
 | 9 | While a newly imported file is still rendering, should its slot be silent, or play at original pitch until ready? | Silent |
+| 10 | ~~Plugin category?~~ | **Answered (M1):** audio effect; Mosaic instance on an Aux strip in Logic |
+| 11 | ~~Send look-behind?~~ | **Answered (M1):** 2 × host block size, min 256; floor re-checked at M5 |
 
 ## 14. Change log
 
+- **v0.4 — 2026-11-16** — M1 decision gate: section 5 rewritten from measurements
+  (`docs/ROUTING_RESULTS.md`); look-behind rule decided (5.3); plugin category decided as
+  audio effect with the Logic Aux placement rule (8); questions 10–11 answered.
 - **v0.3 — 2026-11-16** — M0 review: the Send look-behind `L` must be measured under
   delay compensation (5.3), and the offline-render wait is recorded as the one explicit
   exception to the real-time rules (7.6). No behavior change.
