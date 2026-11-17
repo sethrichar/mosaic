@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.24)
 set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "Build architectures")
 set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version")
 
-project(Mosaic VERSION 0.1.0 LANGUAGES C CXX)
+project(Mosaic VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,11 +16,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(MOSAIC_BUILD_TESTS "Build the Catch2 unit tests" ON)
 option(MOSAIC_COPY_PLUGIN "Copy built plugins into the user plugin folders" ON)
+option(MOSAIC_BUILD_INST_PROBE "Build the M1 instrument-variant probe plugin" ON)
 
 # ---------------------------------------------------------------------------
 # Dependencies (git submodules, pinned — see THIRD_PARTY_LICENSES.md)
 # ---------------------------------------------------------------------------
 add_subdirectory(libs/JUCE)
+
+set(MOSAIC_PLAIN_CXX_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
 
 # ---------------------------------------------------------------------------
 # Engine: plain C++, no JUCE plugin modules. Must build and test on its own.
@@ -30,41 +33,28 @@ add_library(mosaic_engine STATIC
 )
 target_include_directories(mosaic_engine PUBLIC source)
 target_compile_features(mosaic_engine PUBLIC cxx_std_20)
-target_compile_options(mosaic_engine PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
+target_compile_options(mosaic_engine PRIVATE ${MOSAIC_PLAIN_CXX_WARNINGS})
 
 # ---------------------------------------------------------------------------
-# Plugin
+# Send hub: plain C++, lock-free inter-instance transport (SPEC 5.3).
 # ---------------------------------------------------------------------------
-juce_add_plugin(Mosaic
-    PRODUCT_NAME                "Mosaic"
-    COMPANY_NAME                "Richardson Media Solutions"
-    COMPANY_WEBSITE             "https://richardsonmediasolutions.com"
-    BUNDLE_ID                   "com.richardsonmediasolutions.mosaic"
-    PLUGIN_MANUFACTURER_CODE    Rmsl
-    PLUGIN_CODE                 Mosc
-    FORMATS                     AU VST3 Standalone
-    IS_SYNTH                    FALSE
-    NEEDS_MIDI_INPUT            FALSE
-    NEEDS_MIDI_OUTPUT           FALSE
-    IS_MIDI_EFFECT              FALSE
-    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    AU_MAIN_TYPE                kAudioUnitType_Effect
-    VST3_CATEGORIES             Fx
-    VST3_AUTO_MANIFEST          FALSE
-    COPY_PLUGIN_AFTER_BUILD     ${MOSAIC_COPY_PLUGIN}
-    HARDENED_RUNTIME_ENABLED    TRUE
-    MICROPHONE_PERMISSION_ENABLED TRUE
-    MICROPHONE_PERMISSION_TEXT  "Mosaic needs audio input for its Standalone app."
+add_library(mosaic_hub STATIC
+    source/hub/SendHub.cpp
 )
+target_include_directories(mosaic_hub PUBLIC source)
+target_compile_features(mosaic_hub PUBLIC cxx_std_20)
+target_compile_options(mosaic_hub PRIVATE ${MOSAIC_PLAIN_CXX_WARNINGS})
 
-target_sources(Mosaic PRIVATE
+# ---------------------------------------------------------------------------
+# Plugin sources shared by every plugin target and the plugin tests
+# ---------------------------------------------------------------------------
+set(MOSAIC_PLUGIN_SOURCES
+    source/plugin/Parameters.cpp
     source/plugin/PluginProcessor.cpp
     source/plugin/PluginEditor.cpp
 )
 
-target_include_directories(Mosaic PRIVATE source)
-
-target_compile_definitions(Mosaic PUBLIC
+set(MOSAIC_JUCE_DEFINES
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
@@ -72,17 +62,76 @@ target_compile_definitions(Mosaic PUBLIC
     MOSAIC_VERSION_STRING="${PROJECT_VERSION}"
 )
 
-target_compile_options(Mosaic PRIVATE -Wall -Wextra -Wshadow)
+# One function so the shipping plugin and the M1 instrument probe stay identical
+# apart from identity and category.
+function(mosaic_add_plugin target)
+    cmake_parse_arguments(ARG "" "PRODUCT_NAME;PLUGIN_CODE;BUNDLE_ID;IS_SYNTH;NEEDS_MIDI_INPUT;AU_MAIN_TYPE;VST3_CATEGORIES" "" ${ARGN})
 
-target_link_libraries(Mosaic
-    PRIVATE
-        mosaic_engine
-        juce::juce_audio_utils
-    PUBLIC
-        juce::juce_recommended_config_flags
-        juce::juce_recommended_lto_flags
-        juce::juce_recommended_warning_flags
+    juce_add_plugin(${target}
+        PRODUCT_NAME                "${ARG_PRODUCT_NAME}"
+        COMPANY_NAME                "Richardson Media Solutions"
+        COMPANY_WEBSITE             "https://richardsonmediasolutions.com"
+        BUNDLE_ID                   "${ARG_BUNDLE_ID}"
+        PLUGIN_MANUFACTURER_CODE    Rmsl
+        PLUGIN_CODE                 ${ARG_PLUGIN_CODE}
+        FORMATS                     AU VST3 Standalone
+        IS_SYNTH                    ${ARG_IS_SYNTH}
+        NEEDS_MIDI_INPUT            ${ARG_NEEDS_MIDI_INPUT}
+        NEEDS_MIDI_OUTPUT           FALSE
+        IS_MIDI_EFFECT              FALSE
+        EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+        AU_MAIN_TYPE                ${ARG_AU_MAIN_TYPE}
+        VST3_CATEGORIES             ${ARG_VST3_CATEGORIES}
+        VST3_AUTO_MANIFEST          FALSE
+        COPY_PLUGIN_AFTER_BUILD     ${MOSAIC_COPY_PLUGIN}
+        HARDENED_RUNTIME_ENABLED    TRUE
+        MICROPHONE_PERMISSION_ENABLED TRUE
+        MICROPHONE_PERMISSION_TEXT  "Mosaic needs audio input for its Standalone app."
+    )
+
+    target_sources(${target} PRIVATE ${MOSAIC_PLUGIN_SOURCES})
+    target_include_directories(${target} PRIVATE source)
+    target_compile_definitions(${target} PUBLIC ${MOSAIC_JUCE_DEFINES})
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wshadow)
+
+    target_link_libraries(${target}
+        PRIVATE
+            mosaic_engine
+            mosaic_hub
+            juce::juce_audio_utils
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_lto_flags
+            juce::juce_recommended_warning_flags
+    )
+endfunction()
+
+# The plugin. Category is "effect" until the M1 results say otherwise.
+mosaic_add_plugin(Mosaic
+    PRODUCT_NAME     "Mosaic"
+    PLUGIN_CODE      Mosc
+    BUNDLE_ID        "com.richardsonmediasolutions.mosaic"
+    IS_SYNTH         FALSE
+    NEEDS_MIDI_INPUT FALSE
+    AU_MAIN_TYPE     kAudioUnitType_Effect
+    VST3_CATEGORIES  Fx
 )
+
+# M1 only: the same code as an instrument, to test whether hosts keep calling
+# processBlock on empty tracks (BUILD_PLAN M1 task 6). Separate identity so both can
+# coexist. Note: a separate binary means a separate Send hub — Sends in this variant
+# only reach Mosaic instances of this variant.
+if(MOSAIC_BUILD_INST_PROBE)
+    mosaic_add_plugin(MosaicInstProbe
+        PRODUCT_NAME     "Mosaic Inst Probe"
+        PLUGIN_CODE      MosI
+        BUNDLE_ID        "com.richardsonmediasolutions.mosaicinstprobe"
+        IS_SYNTH         TRUE
+        NEEDS_MIDI_INPUT TRUE
+        AU_MAIN_TYPE     kAudioUnitType_MusicDevice
+        VST3_CATEGORIES  Instrument
+    )
+endif()
 
 # ---------------------------------------------------------------------------
 # Tests
