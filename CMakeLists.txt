@@ -22,6 +22,11 @@ option(MOSAIC_BUILD_INST_PROBE "Build the M1 instrument-variant probe plugin" ON
 # Dependencies (git submodules, pinned — see THIRD_PARTY_LICENSES.md)
 # ---------------------------------------------------------------------------
 add_subdirectory(libs/JUCE)
+# Pure C++ FFT, not Accelerate: renders must be bit-identical regardless of buffer
+# alignment or thread (SPEC 7.6, section 11). Offline only, so speed is not a concern.
+set(SIGNALSMITH_USE_ACCELERATE OFF CACHE BOOL "Mosaic: deterministic pure-C++ FFT" FORCE)
+add_subdirectory(libs/signalsmith-linear)    # pinned 0.6.4; defines target signalsmith-linear
+add_subdirectory(libs/signalsmith-stretch)   # pinned 1.4.0; uses the target above instead of FetchContent
 
 set(MOSAIC_PLAIN_CXX_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
 
@@ -38,6 +43,21 @@ add_library(mosaic_engine STATIC
 target_include_directories(mosaic_engine PUBLIC source)
 target_compile_features(mosaic_engine PUBLIC cxx_std_20)
 target_compile_options(mosaic_engine PRIVATE ${MOSAIC_PLAIN_CXX_WARNINGS})
+
+# ---------------------------------------------------------------------------
+# Analysis: key detection and snap math. Plain C++, no plugin or UI dependencies.
+# ---------------------------------------------------------------------------
+add_library(mosaic_analysis STATIC
+    source/analysis/KeyDetector.cpp
+    source/analysis/KeySnap.cpp
+    source/analysis/SignalsmithPitchShifter.cpp
+)
+target_include_directories(mosaic_analysis PUBLIC source)
+target_compile_features(mosaic_analysis PUBLIC cxx_std_20)
+target_compile_options(mosaic_analysis PRIVATE ${MOSAIC_PLAIN_CXX_WARNINGS})
+target_link_libraries(mosaic_analysis PRIVATE signalsmith-stretch)
+# The stretch header is heavy on templates; keep its warnings out of our -Wconversion build.
+set_source_files_properties(source/analysis/SignalsmithPitchShifter.cpp PROPERTIES COMPILE_OPTIONS "-Wno-conversion;-Wno-shadow;-Wno-pedantic")
 
 # ---------------------------------------------------------------------------
 # Sources (plain C++ part): file slot source with lock-free buffer hand-off.
@@ -119,6 +139,7 @@ function(mosaic_add_plugin target)
     target_link_libraries(${target}
         PRIVATE
             mosaic_sources   # brings mosaic_engine with it
+            mosaic_analysis
             mosaic_hub
             juce::juce_audio_utils
         PUBLIC

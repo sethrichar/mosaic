@@ -55,6 +55,10 @@ private:
     std::unique_ptr<ButtonAttachment> avoidRepeatsAtt;
     juce::TextButton reroll { "Reroll" };
 
+    // M4 global key (SPEC 7.2)
+    ParamCombo keyMode, keyRoot, keyScale;
+    juce::Label keyReadout;
+
     // Slots
     std::unique_ptr<ui::SlotRow> rows[MosaicAudioProcessor::kNumSlots];
     juce::Rectangle<int> slotArea;

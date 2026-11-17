@@ -3,7 +3,7 @@
 Rules and context for Claude Code working in this repo. Read this, then `docs/SPEC.md`,
 then `docs/BUILD_PLAN.md`, before changing anything.
 
-**Doc version:** v0.3 (2026-11-16) — previous: `docs/archive/CLAUDE_v0.2.md`
+**Doc version:** v0.4 (2026-11-16) — previous: `docs/archive/CLAUDE_v0.3.md`
 
 ## What this is
 
@@ -61,7 +61,9 @@ the mosaic's key. Full behavior is in `docs/SPEC.md`.
 - Plugin identity: company `Richardson Media Solutions`, manufacturer code `Rmsl` (shared
   with Seth's other plugins — do not change), plugin code `Mosc`, bundle ID
   `com.richardsonmediasolutions.mosaic`.
-- Pitch shifting: Signalsmith Stretch (MIT) in `libs/`, pinned commit: _(fill in at M4)_
+- Pitch shifting: Signalsmith Stretch (MIT) in `libs/signalsmith-stretch`, pinned tag `1.4.0`
+  (commit `a670068`), plus its STFT library `libs/signalsmith-linear`, pinned tag `0.6.4`
+  (commit `de55e6a`). Both MIT. The shifter runs with a fixed seed.
 
 ## Third-party code and licences
 
@@ -91,7 +93,8 @@ docs/
   archive/               (superseded doc versions — never deleted)
 libs/JUCE/               (submodule, pinned 9.0.5)
 libs/Catch2/             (submodule, pinned v3.16.1 — tests only)
-libs/signalsmith-stretch/  (M4, pinned)
+libs/signalsmith-stretch/  (submodule, pinned 1.4.0 — MIT)
+libs/signalsmith-linear/   (submodule, pinned 0.6.4 — MIT; the stretch's STFT)
 source/
   engine/                (pure C++: grid, chooser, slice position, tile renderer — no JUCE plugin deps)
   analysis/              (pure C++: key detector, snap math, PitchShifter interface) (M4)
@@ -100,7 +103,7 @@ source/
   plugin/                (AudioProcessor, parameters, state)
   ui/                    (editor and components)
 tests/
-tools/                   (keydetect command-line tool) (M4)
+tools/                   (engine_demo WAV renderer; keydetect scorer — `build/tools/.../mosaic_keydetect test-audio/key-set`)
 test-audio/              (git-ignored; Seth's local test files — never commit audio)
 scripts/                 (build.sh, validate.sh)
 ```

@@ -12,9 +12,14 @@ add_executable(mosaic_tests
     test_slice_position.cpp
     test_tile_renderer.cpp
     test_file_slot_source.cpp
+    test_key_snap.cpp
+    test_key_detector.cpp
+    test_pitch_shifter.cpp
 )
 target_link_libraries(mosaic_tests PRIVATE
     mosaic_sources   # brings mosaic_engine with it
+    mosaic_analysis
+    signalsmith-stretch   # the shifter experiment drives the library directly
     mosaic_hub
     Catch2::Catch2WithMain
 )
@@ -30,6 +35,7 @@ juce_add_console_app(mosaic_plugin_tests PRODUCT_NAME "mosaic_plugin_tests")
 target_sources(mosaic_plugin_tests PRIVATE
     test_plugin_routing.cpp
     test_plugin_mosaic.cpp
+    test_plugin_key.cpp
     ${MOSAIC_PLUGIN_SOURCES_ABS}
 )
 target_include_directories(mosaic_plugin_tests PRIVATE ${CMAKE_SOURCE_DIR}/source)
@@ -45,6 +51,7 @@ target_compile_definitions(mosaic_plugin_tests PRIVATE
 )
 target_link_libraries(mosaic_plugin_tests PRIVATE
     mosaic_sources
+    mosaic_analysis
     mosaic_hub
     Catch2::Catch2WithMain
     juce::juce_audio_utils

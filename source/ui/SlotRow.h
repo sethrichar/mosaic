@@ -44,8 +44,17 @@ private:
     std::unique_ptr<SliderAttachment> gainAtt, weightAtt, startOffsetAtt;
     std::unique_ptr<ButtonAttachment> muteAtt, loopAtt;
 
+    // M4 key controls (SPEC 7.3)
+    using ComboAttachment = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
+    juce::Label keyBadge, shiftReadout, transposeLabel, fineLabel;
+    juce::ComboBox sourceKeyBox, keyModeBox, directionBox;
+    juce::Slider transpose, fine;
+    std::unique_ptr<ComboAttachment> keyModeAtt, directionAtt;
+    std::unique_ptr<SliderAttachment> transposeAtt, fineAtt;
+    bool updatingSourceKeyBox = false;
+
     bool active = false, highlight = false;
-    juce::String lastName;
+    juce::String lastName, lastBadge, lastShift;
 };
 
 } // namespace mosaic::ui
