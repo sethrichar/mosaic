@@ -60,9 +60,21 @@ MosaicAudioProcessor::MosaicAudioProcessor()
         pSlotWeight[s]      = apvts.getRawParameterValue (params::slotParam (s, params::slotWeightSuffix));
         pSlotStartOffset[s] = apvts.getRawParameterValue (params::slotParam (s, params::slotStartOffsetSuffix));
         pSlotLoop[s]        = apvts.getRawParameterValue (params::slotParam (s, params::slotLoopSuffix));
+        pSlotKeyMode[s]     = apvts.getRawParameterValue (params::slotParam (s, params::slotKeyModeSuffix));
+        pSlotDirection[s]   = apvts.getRawParameterValue (params::slotParam (s, params::slotDirectionSuffix));
+        pSlotTranspose[s]   = apvts.getRawParameterValue (params::slotParam (s, params::slotTransposeSuffix));
+        pSlotFine[s]        = apvts.getRawParameterValue (params::slotParam (s, params::slotFineSuffix));
         slotPtrs[s] = &fileSources[s];
         tele.slotPlayPos[s].store (-1);
+
+        for (const char* suffix : { params::slotKeyModeSuffix, params::slotDirectionSuffix, params::slotTransposeSuffix, params::slotFineSuffix })
+            apvts.addParameterListener (params::slotParam (s, suffix), &keyListener);
     }
+    pKeyMode  = apvts.getRawParameterValue (params::keyMode);
+    pKeyRoot  = apvts.getRawParameterValue (params::keyRoot);
+    pKeyScale = apvts.getRawParameterValue (params::keyScale);
+    for (const char* id : { params::keyMode, params::keyRoot, params::keyScale })
+        apvts.addParameterListener (id, &keyListener);
 
     // Default sequence (editable in M6): slots 1-8 in order, twice.
     chooserScratch.sequenceLength = 16;
@@ -76,6 +88,7 @@ MosaicAudioProcessor::MosaicAudioProcessor()
         if (slot >= 0 && slot < kNumSlots && slots[slot].generation == generation)
             applyLoadResult (slot, std::move (result));
     });
+    updateEffectiveKey();
 
     renderer.prepare (512);
     startTimerHz (20);
@@ -84,6 +97,11 @@ MosaicAudioProcessor::MosaicAudioProcessor()
 MosaicAudioProcessor::~MosaicAudioProcessor()
 {
     stopTimer();
+    for (int s = 0; s < kNumSlots; ++s)
+        for (const char* suffix : { params::slotKeyModeSuffix, params::slotDirectionSuffix, params::slotTransposeSuffix, params::slotFineSuffix })
+            apvts.removeParameterListener (params::slotParam (s, suffix), &keyListener);
+    for (const char* id : { params::keyMode, params::keyRoot, params::keyScale })
+        apvts.removeParameterListener (id, &keyListener);
     loader.setCallback (nullptr);
     if (claimedChannel >= 0)
         hub::SendHub::instance().channelAt (claimedChannel).releaseOwnership (myInstanceId);
@@ -156,8 +174,124 @@ void MosaicAudioProcessor::applyMessageThreadUpdates()
         loadedForSampleRate = preparedSampleRate;
         for (int s = 0; s < kNumSlots; ++s)
             if (slots[s].hasFile() && ! slots[s].missing)
-                loadFile (s, slots[s].file);
+                beginLoad (s, slots[s].file, ! slots[s].keyDetected);   // keep the detected key (SPEC 7.5)
     }
+
+    runDueRenders();
+}
+
+//==============================================================================
+// Key
+
+analysis::Key MosaicAudioProcessor::effectiveKey (bool& known, int* sourceSlot) const noexcept
+{
+    if (sourceSlot != nullptr) *sourceSlot = -1;
+    if (choice (pKeyMode) == 1)
+    {
+        known = true;
+        return { choice (pKeyRoot), choice (pKeyScale) == 1 ? analysis::Scale::Minor : analysis::Scale::Major };
+    }
+    for (int s = 0; s < kNumSlots; ++s)
+        if (slots[s].hasFile() && ! slots[s].missing && slots[s].confidentSourceKey())
+        {
+            known = true;
+            if (sourceSlot != nullptr) *sourceSlot = s;
+            return slots[s].sourceKey();
+        }
+    known = false;
+    return {};
+}
+
+void MosaicAudioProcessor::updateEffectiveKey()
+{
+    bool known = false;
+    int src = -1;
+    const auto key = effectiveKey (known, &src);
+    tele.effectiveKeyIndex.store (known ? key.toIndex() : -1);
+    tele.effectiveKeySourceSlot.store (src);
+}
+
+double MosaicAudioProcessor::desiredShiftFor (int slot) const noexcept
+{
+    const auto& info = slots[slot];
+    const int transpose = choice (pSlotTranspose[slot]);
+    const double fine = pSlotFine[slot]->load();
+    const bool snap = choice (pSlotKeyMode[slot]) == 0;
+
+    bool known = false;
+    const auto target = effectiveKey (known);
+    if (! snap || ! known || ! info.sourceKeyKnown())
+        return analysis::KeySnap::manualShift (transpose, fine);
+
+    const auto dir = (analysis::Direction) juce::jlimit (0, 2, choice (pSlotDirection[slot]));
+    return analysis::KeySnap::totalShift (info.sourceKey(), target, dir, transpose, fine);
+}
+
+void MosaicAudioProcessor::setSlotKeyOverride (int slot, analysis::Key key)
+{
+    if (slot < 0 || slot >= kNumSlots) return;
+    slots[slot].hasOverride = true;
+    slots[slot].overrideKey = key;
+    scheduleRenders();
+}
+
+void MosaicAudioProcessor::clearSlotKeyOverride (int slot)
+{
+    if (slot < 0 || slot >= kNumSlots) return;
+    slots[slot].hasOverride = false;
+    scheduleRenders();
+}
+
+void MosaicAudioProcessor::runDueRenders()
+{
+    updateEffectiveKey();
+    for (int s = 0; s < kNumSlots; ++s)
+        slots[s].desiredShift = (slots[s].hasFile() && ! slots[s].missing) ? desiredShiftFor (s) : 0.0;
+
+    if (! rendersDirty.load())
+        return;
+
+    // Debounce: rapid changes (dragging Fine) coalesce into one render per slot.
+    const double now = juce::Time::getMillisecondCounterHiRes();
+    if (lastRenderCheckMs == 0.0) lastRenderCheckMs = now;
+    if (now - lastRenderCheckMs < kRenderDebounceMs)
+        return;
+    lastRenderCheckMs = 0.0;
+    rendersDirty.store (false);
+
+    for (int s = 0; s < kNumSlots; ++s)
+    {
+        auto& info = slots[s];
+        if (! info.hasFile() || info.missing || info.analyzing || info.error.isNotEmpty())
+            continue;
+        if (std::abs (info.desiredShift - info.renderedShift) < 1e-6 && ! info.rendering)
+            continue;
+        // A render is in flight for a now-stale target, or the target changed: re-render
+        // from disk (only the played buffer stays in RAM, SPEC 6).
+        info.rendering = true;
+        info.generation++;
+        loader.requestRender (s, info.generation, info.file, preparedSampleRate, nullptr, info.desiredShift);
+    }
+}
+
+void MosaicAudioProcessor::publishOrRender (int slot, std::unique_ptr<sources::LoadedBuffer> original)
+{
+    auto& info = slots[slot];
+    updateEffectiveKey();
+    info.desiredShift = desiredShiftFor (slot);
+
+    if (std::abs (info.desiredShift) < 1e-6)
+    {
+        info.renderedShift = 0.0;
+        info.rendering = false;
+        info.bytes = original->bytes();
+        fileSources[slot].publish (std::move (original));
+        return;
+    }
+    // Shifted: the slot stays silent until the render is ready (SPEC 7.6).
+    info.rendering = true;
+    info.generation++;
+    loader.requestRender (slot, info.generation, info.file, preparedSampleRate, std::move (original), info.desiredShift);
 }
 
 //==============================================================================
@@ -180,9 +314,6 @@ void MosaicAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         tele.maxBlockSize.store (n);
     }
 
-    for (auto& fs : fileSources)
-        fs.pollIncoming();
-
     // Playhead: the host's, or the Standalone transport when the host has none.
     juce::Optional<juce::AudioPlayHead::PositionInfo> pos;
     if (auto* ph = getPlayHead())
@@ -203,6 +334,10 @@ void MosaicAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
         if (const auto b = pos->getBpm())         { tele.hasBpm.store (true); tele.bpm.store (*b); } else tele.hasBpm.store (false);
     }
     tele.isPlaying.store (playing);
+
+    if (isNonRealtime())
+        waitForPendingWorkOffline();                    // SPEC 7.6 / CLAUDE.md: the one sanctioned wait
+    pollSourcesAtTileBoundaries (n, playing, getSampleRate());
 
     // Input meters, measured before anything overwrites the buffer.
     const int inBuses = getBusCount (true);
@@ -248,6 +383,43 @@ void MosaicAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce:
 
     auto out = getBusBuffer (buffer, false, 0);
     tele.outputPeak.store (out.getNumChannels() > 0 ? out.getMagnitude (0, n) : 0.0f);
+}
+
+void MosaicAudioProcessor::pollSourcesAtTileBoundaries (int n, bool playing, double sampleRate)
+{
+    // A new buffer (load, clear, or finished render) swaps in only when its slot is not
+    // sounding: not the active slot and past any crossfade tail. If the slot never goes
+    // quiet (single-slot mosaic) the swap happens anyway after ~2 s. Stopped: immediately.
+    const int active = tele.activeSlot.load (std::memory_order_relaxed);
+    const int fadeSamples = (int) std::lround (pFade->load() * (sampleRate > 0.0 ? sampleRate : 48000.0) / 1000.0);
+    const int maxWaitBlocks = (int) std::max<int64_t> (1, (int64_t) (2.0 * (sampleRate > 0.0 ? sampleRate : 48000.0)) / std::max (1, n));
+
+    for (int s = 0; s < kNumSlots; ++s)
+    {
+        const bool sounding = playing && (s == active || s == lastActiveSlot);
+        blocksSinceActive[s] = sounding ? 0 : std::min (blocksSinceActive[s] + 1, 1 << 20);
+        if (! fileSources[s].hasIncoming())
+            continue;
+        const bool pastFade = (int64_t) blocksSinceActive[s] * n > fadeSamples + n;
+        if (! playing || (! sounding && pastFade) || blocksSinceActive[s] > maxWaitBlocks || isNonRealtime())
+            fileSources[s].pollIncoming();
+    }
+    lastActiveSlot = active;
+}
+
+void MosaicAudioProcessor::waitForPendingWorkOffline()
+{
+    // Offline bounce: wait (bounded) for loads and renders so the bounce never contains
+    // silence or stale pitch. Results are published by the message thread, so this only
+    // helps when the host keeps its message loop running during the bounce (they do).
+    int waited = 0;
+    while (loader.pendingJobs() > 0 && waited < kOfflineWaitLimitMs)
+    {
+        juce::Thread::sleep (2);
+        waited += 2;
+    }
+    if (waited > 0)
+        tele.offlineWaitsMs.fetch_add (waited);
 }
 
 void MosaicAudioProcessor::processEngine (juce::AudioBuffer<float>& buffer, int n,
@@ -447,34 +619,51 @@ void MosaicAudioProcessor::processProbe (juce::AudioBuffer<float>& buffer, int n
 //==============================================================================
 // Files
 
-void MosaicAudioProcessor::loadFile (int slot, const juce::File& file)
+void MosaicAudioProcessor::beginLoad (int slot, const juce::File& file, bool detectKey)
 {
-    if (slot < 0 || slot >= kNumSlots) return;
     auto& info = slots[slot];
     info.file = file;
     info.error.clear();
     info.generation++;
     info.missing = ! file.existsAsFile();
     info.loading = ! info.missing;
+    info.analyzing = ! info.missing && detectKey;
+    info.rendering = false;
+    info.renderedShift = 0.0;
 
     if (info.missing)
     {
         info.lengthSamples = 0; info.bytes = 0; info.overview.reset();
         fileSources[slot].publish (nullptr);
+        updateEffectiveKey();
         return;
     }
 
     loadedForSampleRate = preparedSampleRate;
-    loader.request (slot, info.generation, file, preparedSampleRate);
+    loader.requestLoad (slot, info.generation, file, preparedSampleRate, detectKey);
+}
+
+void MosaicAudioProcessor::loadFile (int slot, const juce::File& file)
+{
+    if (slot < 0 || slot >= kNumSlots) return;
+    // A fresh import: forget any override and detection, detect again (SPEC 7.1).
+    slots[slot].hasOverride = false;
+    slots[slot].keyDetected = false;
+    slots[slot].key = {};
+    beginLoad (slot, file, true);
 }
 
 void MosaicAudioProcessor::clearSlot (int slot)
 {
     if (slot < 0 || slot >= kNumSlots) return;
-    auto& info = slots[slot];
-    info = SlotInfo {};
-    info.generation = slots[slot].generation + 1;
+    const int gen = slots[slot].generation + 1;
+    slots[slot] = SlotInfo {};
+    slots[slot].generation = gen;
+    loader.requestLoad (slot, gen, juce::File(), preparedSampleRate, false);   // cancels any running job; result is "not found" and ignored
+    slots[slot].generation = gen + 1;                                           // ...because we bump past it here
     fileSources[slot].publish (nullptr);
+    scheduleRenders();
+    updateEffectiveKey();
 }
 
 bool MosaicAudioProcessor::loadFileNow (int slot, const juce::File& file)
@@ -486,14 +675,26 @@ bool MosaicAudioProcessor::loadFileNow (int slot, const juce::File& file)
     info.generation++;
     info.missing = ! file.existsAsFile();
     info.loading = false;
+    info.hasOverride = false;
+    info.keyDetected = false;
     if (info.missing)
     {
         fileSources[slot].publish (nullptr);
         return false;
     }
-    auto result = sources::FileLoader::loadNow (file, preparedSampleRate);
+    auto result = sources::FileLoader::loadNow (file, preparedSampleRate, true);
     const bool ok = result.ok;
     applyLoadResult (slot, std::move (result));
+    // Synchronous path: render now too, so tests and tools see the final buffer.
+    if (ok && info.rendering)
+    {
+        auto original = sources::FileLoader::loadNow (file, preparedSampleRate, false);
+        if (original.ok)
+        {
+            auto rendered = sources::FileLoader::renderNow (*original.buffer, info.desiredShift);
+            applyLoadResult (slot, std::move (rendered));
+        }
+    }
     return ok;
 }
 
@@ -501,19 +702,47 @@ void MosaicAudioProcessor::applyLoadResult (int slot, sources::FileLoader::Resul
 {
     auto& info = slots[slot];
     info.loading = false;
+    info.analyzing = false;
+
     if (! result.ok)
     {
+        info.rendering = false;
         info.error = result.error;
         info.lengthSamples = 0; info.bytes = 0; info.overview.reset();
         fileSources[slot].publish (nullptr);
+        updateEffectiveKey();
         return;
     }
+
     info.lengthSamples    = result.buffer->numSamples;
-    info.sourceSampleRate = result.sourceSampleRate;
-    info.sourceChannels   = result.sourceChannels;
-    info.bytes            = result.buffer->bytes();
+    info.sourceSampleRate = result.sourceSampleRate > 0.0 ? result.sourceSampleRate : info.sourceSampleRate;
+    info.sourceChannels   = result.sourceChannels > 0 ? result.sourceChannels : info.sourceChannels;
     info.overview         = result.overview;
-    fileSources[slot].publish (std::move (result.buffer));
+
+    if (result.rendered)
+    {
+        info.rendering = false;
+        info.renderedShift = result.renderedSemitones;
+        info.bytes = result.buffer->bytes();
+        fileSources[slot].publish (std::move (result.buffer));
+        return;
+    }
+
+    if (result.keyDetected)
+    {
+        info.keyDetected = true;
+        info.key = result.key;
+        // Import default (SPEC 7.3): Snap if confident, Original otherwise.
+        if (auto* p = apvts.getParameter (params::slotParam (slot, params::slotKeyModeSuffix)))
+        {
+            const float v = (result.key.found && result.key.level == analysis::Confidence::High) ? 0.0f : 1.0f;
+            p->setValueNotifyingHost (p->convertTo0to1 (v));
+        }
+        rendersDirty.store (false);   // the listener above marked us dirty; this slot is handled right here
+    }
+
+    publishOrRender (slot, std::move (result.buffer));
+    scheduleRenders();                // the Auto key may have changed for the other slots
 }
 
 size_t MosaicAudioProcessor::totalFileBytes() const noexcept
@@ -542,8 +771,16 @@ juce::ValueTree MosaicAudioProcessor::filesToTree() const
     {
         if (! slots[s].hasFile()) continue;
         juce::ValueTree slot (kSlotTreeType);
+        const auto& info = slots[s];
         slot.setProperty ("index", s, nullptr);
-        slot.setProperty ("path", slots[s].file.getFullPathName(), nullptr);
+        slot.setProperty ("path", info.file.getFullPathName(), nullptr);
+        slot.setProperty ("keyDetected", info.keyDetected, nullptr);
+        slot.setProperty ("keyFound", info.keyDetected && info.key.found, nullptr);
+        slot.setProperty ("detectedKey", info.keyDetected ? info.key.key.toIndex() : -1, nullptr);
+        slot.setProperty ("confidence", info.key.confidence, nullptr);
+        slot.setProperty ("confidenceLevel", (int) info.key.level, nullptr);
+        slot.setProperty ("tuningCents", info.key.tuningCents, nullptr);
+        slot.setProperty ("overrideKey", info.hasOverride ? info.overrideKey.toIndex() : -1, nullptr);
         files.appendChild (slot, nullptr);
     }
     return files;
@@ -559,7 +796,24 @@ void MosaicAudioProcessor::filesFromTree (const juce::ValueTree& files)
         const juce::String path = slot.getProperty ("path").toString();
         if (s < 0 || s >= kNumSlots || path.isEmpty()) continue;
         present[s] = true;
-        loadFile (s, juce::File (path));          // missing files set the "missing" state, nothing else breaks
+
+        // Restore the saved key data; never re-detect on restore (SPEC 7.5).
+        auto& info = slots[s];
+        info.keyDetected = (bool) slot.getProperty ("keyDetected", false);
+        info.key = {};
+        if (info.keyDetected)
+        {
+            info.key.found = (bool) slot.getProperty ("keyFound", false);
+            info.key.key = analysis::Key::fromIndex ((int) slot.getProperty ("detectedKey", 0));
+            info.key.confidence = (float) (double) slot.getProperty ("confidence", 0.0);
+            info.key.level = (analysis::Confidence) juce::jlimit (0, 2, (int) slot.getProperty ("confidenceLevel", 0));
+            info.key.tuningCents = (float) (double) slot.getProperty ("tuningCents", 0.0);
+        }
+        const int ov = (int) slot.getProperty ("overrideKey", -1);
+        info.hasOverride = ov >= 0;
+        if (info.hasOverride) info.overrideKey = analysis::Key::fromIndex (ov);
+
+        beginLoad (s, juce::File (path), ! info.keyDetected);   // missing files set the "missing" state, nothing else breaks
     }
     for (int s = 0; s < kNumSlots; ++s)
         if (! present[s] && slots[s].hasFile())
@@ -584,7 +838,7 @@ void MosaicAudioProcessor::setStateInformation (const void* data, int sizeInByte
     if (! state.isValid() || ! state.hasType ("MosaicState"))
         return;
 
-    // Versions 1 and 2 differ only by added parameters and the files child; the APVTS
+    // Versions 1–3 differ only by added parameters and files-tree properties; the APVTS
     // fills in defaults for anything missing.
     apvts.replaceState (state);
 

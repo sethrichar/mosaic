@@ -7,6 +7,7 @@
 #include "engine/TileRenderer.h"
 #include "hub/SendHub.h"
 #include "plugin/Parameters.h"
+#include "analysis/KeySnap.h"
 #include "plugin/SlotInfo.h"
 #include "plugin/StandaloneTransport.h"
 #include "sources/FileLoader.h"
@@ -56,8 +57,9 @@ public:
     void setStateInformation (const void* data, int sizeInBytes) override;
 
     /// Bumped whenever the saved state layout changes (CLAUDE.md rule 7).
-    /// 1 = M0/M1 (no files), 2 = M3 (mosaic parameters + file paths).
-    static constexpr int kStateVersion = 2;
+    /// 1 = M0/M1 (no files), 2 = M3 (mosaic parameters + file paths),
+    /// 3 = M4 (key parameters, per-slot key data in the files tree).
+    static constexpr int kStateVersion = 3;
 
     //==========================================================================
     /// Written on the audio thread, read by the UI and tests. Atomics only.
@@ -88,6 +90,11 @@ public:
         std::atomic<int64_t>  stepIndex { 0 };
         std::atomic<int64_t>  slotPlayPos[kNumSlots] {};    ///< source position of the playing slot, -1 otherwise
         std::atomic<float>    outputPeak { 0.0f };
+
+        // M4 key
+        std::atomic<int>      effectiveKeyIndex { -1 };     ///< Key::toIndex() of the global Key, -1 = none (message thread writes)
+        std::atomic<int>      effectiveKeySourceSlot { -1 }; ///< slot that set it in Auto mode, -1 manual/none
+        std::atomic<int>      offlineWaitsMs { 0 };          ///< total ms spent waiting for renders in offline mode
     };
 
     const Telemetry& telemetry() const noexcept { return tele; }
@@ -113,6 +120,27 @@ public:
     void reroll();
 
     //==========================================================================
+    // Key (SPEC 7), message thread
+
+    /// The global Key in effect: Manual parameters, or in Auto the lowest-numbered slot
+    /// with a confident source key. known == false means "no key": nothing snaps.
+    analysis::Key effectiveKey (bool& known, int* sourceSlot = nullptr) const noexcept;
+
+    /// User override of a slot's source key (treated as fully confident).
+    void setSlotKeyOverride (int slot, analysis::Key key);
+    void clearSlotKeyOverride (int slot);
+
+    /// Semitones the current settings ask for on this slot (snap + transpose + fine).
+    double desiredShiftFor (int slot) const noexcept;
+
+    /// Re-renders every slot whose desired shift differs from its rendered shift.
+    /// Debounced by the timer; call after anything that may change a shift.
+    void scheduleRenders() noexcept { rendersDirty.store (true); }
+
+    float renderProgress (int slot) const noexcept { return loader.renderProgress (slot); }
+    bool  isBusy() const noexcept { return loader.pendingJobs() > 0; }
+
+    //==========================================================================
     // Standalone transport (SPEC 4.1)
     StandaloneTransport& standaloneTransport() noexcept { return standalone; }
     bool usesStandaloneTransport() const noexcept { return wrapperType == wrapperType_Standalone; }
@@ -131,8 +159,23 @@ private:
     void copyInputBusToOutput (juce::AudioBuffer<float>&, int bus, int n);
 
     void applyLoadResult (int slot, sources::FileLoader::Result&&);
+    void beginLoad (int slot, const juce::File&, bool detectKey);
+    void publishOrRender (int slot, std::unique_ptr<sources::LoadedBuffer> original);
+    void runDueRenders();
+    void updateEffectiveKey();
+    void pollSourcesAtTileBoundaries (int n, bool playing, double sampleRate);
+    void waitForPendingWorkOffline();
     juce::ValueTree filesToTree() const;
     void filesFromTree (const juce::ValueTree&);
+
+    class KeyParamListener final : public juce::AudioProcessorValueTreeState::Listener
+    {
+    public:
+        explicit KeyParamListener (MosaicAudioProcessor& o) : owner (o) {}
+        void parameterChanged (const juce::String&, float) override { owner.scheduleRenders(); }
+    private:
+        MosaicAudioProcessor& owner;
+    };
 
     juce::AudioProcessorValueTreeState apvts;
 
@@ -144,6 +187,9 @@ private:
     std::atomic<float>* pAvoidRepeats; std::atomic<float>* pOutputGain;
     std::atomic<float>* pSlotGain[kNumSlots]; std::atomic<float>* pSlotMute[kNumSlots]; std::atomic<float>* pSlotWeight[kNumSlots];
     std::atomic<float>* pSlotStartOffset[kNumSlots]; std::atomic<float>* pSlotLoop[kNumSlots];
+    std::atomic<float>* pKeyMode; std::atomic<float>* pKeyRoot; std::atomic<float>* pKeyScale;
+    std::atomic<float>* pSlotKeyMode[kNumSlots]; std::atomic<float>* pSlotDirection[kNumSlots];
+    std::atomic<float>* pSlotTranspose[kNumSlots]; std::atomic<float>* pSlotFine[kNumSlots];
 
     engine::TileRenderer renderer;
     sources::FileSlotSource fileSources[kNumSlots];
@@ -160,6 +206,15 @@ private:
     Telemetry tele;
     const int myInstanceId;
     int claimedChannel = -1;
+
+    // M4
+    KeyParamListener keyListener { *this };
+    std::atomic<bool> rendersDirty { false };
+    double lastRenderCheckMs = 0.0;
+    int blocksSinceActive[kNumSlots] {};          // audio thread: for tile-boundary swaps
+    int lastActiveSlot = -1;                      // audio thread
+    static constexpr int kRenderDebounceMs = 300;
+    static constexpr int kOfflineWaitLimitMs = 30000;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE (MosaicAudioProcessor)
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MosaicAudioProcessor)

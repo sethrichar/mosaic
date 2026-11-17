@@ -13,21 +13,54 @@ FileLoader::FileLoader() : juce::Thread ("Mosaic File Loader")
 
 FileLoader::~FileLoader()
 {
+    for (auto& f : cancelFlags) f.store (true);
     signalThreadShouldExit();
     wake.signal();
-    stopThread (5000);
+    stopThread (10000);
 }
 
-void FileLoader::request (int slot, int generation, const juce::File& file, double targetSampleRate)
+void FileLoader::requestLoad (int slot, int generation, const juce::File& file, double targetSampleRate, bool detectKey)
 {
     if (slot < 0 || slot >= engine::kNumSlots) return;
     latestGeneration[slot].store (generation);
+    cancelFlags[slot].store (true);   // whatever is running for this slot is stale now
     {
         const juce::ScopedLock sl (lock);
         jobs.erase (std::remove_if (jobs.begin(), jobs.end(), [slot] (const Job& j) { return j.slot == slot; }), jobs.end());
-        jobs.push_back ({ slot, generation, file, targetSampleRate });
+        jobs.push_back ({ Job::Kind::Load, slot, generation, file, targetSampleRate, detectKey, nullptr, 0.0 });
     }
+    pending.fetch_add (1);
     wake.signal();
+}
+
+void FileLoader::requestRender (int slot, int generation, const juce::File& file, double targetSampleRate,
+                                std::unique_ptr<LoadedBuffer> original, double semitones)
+{
+    if (slot < 0 || slot >= engine::kNumSlots) return;
+    latestGeneration[slot].store (generation);
+    cancelFlags[slot].store (true);
+    {
+        const juce::ScopedLock sl (lock);
+        jobs.erase (std::remove_if (jobs.begin(), jobs.end(), [slot] (const Job& j) { return j.slot == slot; }), jobs.end());
+        jobs.push_back ({ Job::Kind::Render, slot, generation, file, targetSampleRate, false,
+                          std::shared_ptr<LoadedBuffer> (std::move (original)), semitones });
+    }
+    pending.fetch_add (1);
+    wake.signal();
+}
+
+void FileLoader::post (int slot, int gen, std::shared_ptr<Result> result)
+{
+    juce::WeakReference<FileLoader> weak (this);
+    juce::MessageManager::callAsync ([weak, slot, gen, result]
+    {
+        if (auto* self = weak.get())
+        {
+            self->pending.fetch_sub (1);
+            if (self->callback != nullptr && self->latestGeneration[slot].load() == gen)
+                self->callback (slot, gen, std::move (*result));
+        }
+    });
 }
 
 void FileLoader::run()
@@ -53,25 +86,48 @@ void FileLoader::run()
         }
 
         if (latestGeneration[job.slot].load() != job.generation)
-            continue;   // superseded before it started
-
-        auto result = std::make_shared<Result> (loadNow (job.file, job.rate));
-
-        if (threadShouldExit() || latestGeneration[job.slot].load() != job.generation)
-            continue;   // superseded while loading: drop the result
-
-        juce::WeakReference<FileLoader> weak (this);
-        const int slot = job.slot, gen = job.generation;
-        juce::MessageManager::callAsync ([weak, slot, gen, result]
         {
-            if (auto* self = weak.get())
-                if (self->callback != nullptr && self->latestGeneration[slot].load() == gen)
-                    self->callback (slot, gen, std::move (*result));
-        });
+            pending.fetch_sub (1);
+            continue;   // superseded before it started
+        }
+
+        cancelFlags[job.slot].store (false);
+        progress[job.slot].store (0.0f);
+        std::shared_ptr<Result> result;
+
+        if (job.kind == Job::Kind::Load)
+        {
+            result = std::make_shared<Result> (loadNow (job.file, job.rate, job.detectKey, &cancelFlags[job.slot]));
+        }
+        else
+        {
+            std::shared_ptr<LoadedBuffer> original = job.original;
+            if (original == nullptr)
+            {
+                auto reload = loadNow (job.file, job.rate, false, &cancelFlags[job.slot]);
+                if (! reload.ok)
+                {
+                    result = std::make_shared<Result> (std::move (reload));
+                }
+                else
+                    original = std::shared_ptr<LoadedBuffer> (std::move (reload.buffer));
+            }
+            if (result == nullptr)
+                result = std::make_shared<Result> (renderNow (*original, job.semitones, &cancelFlags[job.slot], &progress[job.slot]));
+        }
+        progress[job.slot].store (1.0f);
+
+        if (threadShouldExit() || latestGeneration[job.slot].load() != job.generation || cancelFlags[job.slot].load())
+        {
+            pending.fetch_sub (1);
+            continue;   // superseded while working: drop the result
+        }
+
+        post (job.slot, job.generation, std::move (result));
     }
 }
 
-FileLoader::Result FileLoader::loadNow (const juce::File& file, double targetSampleRate)
+FileLoader::Result FileLoader::loadNow (const juce::File& file, double targetSampleRate, bool detectKey, std::atomic<bool>* cancel)
 {
     Result r;
 
@@ -101,14 +157,13 @@ FileLoader::Result FileLoader::loadNow (const juce::File& file, double targetSam
     if (targetSampleRate <= 0.0)
         targetSampleRate = sourceRate;
 
-    // Read everything as float, keeping at most the first two channels.
     const int keepChannels = std::min (2, sourceChannels);
     juce::AudioBuffer<float> source (keepChannels, (int) sourceLength);
     {
-        // Read in chunks so very long files don't need the reader's full-width scratch.
         const int chunk = 1 << 16;
         for (int64_t pos = 0; pos < sourceLength; pos += chunk)
         {
+            if (cancel != nullptr && cancel->load()) { r.error = "Cancelled"; return r; }
             const int n = (int) std::min<int64_t> (chunk, sourceLength - pos);
             if (! reader->read (&source, (int) pos, n, pos, true, keepChannels > 1))
             {
@@ -133,22 +188,22 @@ FileLoader::Result FileLoader::loadNow (const juce::File& file, double targetSam
     }
     else
     {
-        const double ratio = sourceRate / targetSampleRate;   // input samples per output sample
+        const double ratio = sourceRate / targetSampleRate;
         const int64_t outLength = (int64_t) std::llround ((double) sourceLength / ratio);
         out->numSamples = outLength;
 
-        // The interpolator reads a little past what it strictly needs: pad with silence.
         const int pad = 512;
         std::vector<float> padded ((size_t) (sourceLength + pad), 0.0f);
 
         for (int ch = 0; ch < 2; ++ch)
         {
+            if (cancel != nullptr && cancel->load()) { r.error = "Cancelled"; return r; }
             const int srcCh = std::min (ch, keepChannels - 1);
             std::copy (source.getReadPointer (srcCh), source.getReadPointer (srcCh) + sourceLength, padded.begin());
             std::vector<float>& dst = ch == 0 ? out->left : out->right;
             if (ch == 1 && keepChannels == 1)
             {
-                dst = out->left;   // mono: identical channels, resampled once
+                dst = out->left;
                 break;
             }
             dst.assign ((size_t) outLength, 0.0f);
@@ -158,10 +213,52 @@ FileLoader::Result FileLoader::loadNow (const juce::File& file, double targetSam
         }
     }
 
+    if (detectKey)
+    {
+        r.key = analysis::KeyDetector::analyze (out->left.data(), out->right.data(), out->numSamples, targetSampleRate, {}, cancel);
+        if (cancel != nullptr && cancel->load()) { r.error = "Cancelled"; return r; }
+        r.keyDetected = true;
+    }
+
     r.overview = makeOverview (*out);
     r.buffer = std::move (out);
     r.sourceSampleRate = sourceRate;
     r.sourceChannels = sourceChannels;
+    r.ok = true;
+    return r;
+}
+
+FileLoader::Result FileLoader::renderNow (const LoadedBuffer& original, double semitones, std::atomic<bool>* cancel,
+                                          std::atomic<float>* progressOut)
+{
+    Result r;
+    if (original.numSamples <= 0)
+    {
+        r.error = "Nothing to render";
+        return r;
+    }
+
+    auto out = std::make_unique<LoadedBuffer>();
+    out->sampleRate = original.sampleRate;
+    out->sourceRate = original.sourceRate;
+    out->numSamples = original.numSamples;
+    out->left.assign ((size_t) original.numSamples, 0.0f);
+    out->right.assign ((size_t) original.numSamples, 0.0f);
+
+    analysis::SignalsmithPitchShifter shifter;
+    if (! shifter.shift (original.left.data(), original.right.data(), original.numSamples, original.sampleRate,
+                         semitones, out->left.data(), out->right.data(), cancel))
+    {
+        r.error = "Cancelled";
+        return r;
+    }
+    if (progressOut != nullptr) progressOut->store (1.0f);
+
+    r.overview = makeOverview (*out);
+    r.buffer = std::move (out);
+    r.sourceSampleRate = original.sourceRate;
+    r.rendered = true;
+    r.renderedSemitones = semitones;
     r.ok = true;
     return r;
 }

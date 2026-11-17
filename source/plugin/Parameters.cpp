@@ -1,6 +1,7 @@
 #include "plugin/Parameters.h"
 #include "engine/Rate.h"
 #include "engine/StepChooser.h"
+#include "analysis/Key.h"
 
 namespace mosaic::params
 {
@@ -67,6 +68,16 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
         ParameterID { outputGain, 1 }, "Output gain", NormalisableRange<float> (kMinGainDb, kMaxGainDb, 0.1f), 0.0f,
         AudioParameterFloatAttributes().withLabel ("dB")));
 
+    // --- M4 key: global ---
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { keyMode, 1 }, "Key mode", StringArray { "Auto", "Manual" }, 0, nonAuto));
+    StringArray roots;
+    for (int i = 0; i < 12; ++i) roots.add (analysis::Key::rootName (i));
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { keyRoot, 1 }, "Key root", roots, 0, nonAuto));
+    layout.add (std::make_unique<AudioParameterChoice> (
+        ParameterID { keyScale, 1 }, "Key scale", StringArray { "Major", "Minor" }, 0, nonAuto));
+
     // --- M3 per slot ---
     for (int s = 0; s < engine::kNumSlots; ++s)
     {
@@ -84,6 +95,19 @@ juce::AudioProcessorValueTreeState::ParameterLayout createLayout()
             NormalisableRange<float> (-16.0f, 16.0f, 0.25f), 0.0f, AudioParameterFloatAttributes().withLabel ("bars")));
         layout.add (std::make_unique<AudioParameterBool> (
             ParameterID { slotParam (s, slotLoopSuffix), 1 }, name + "loop", true));
+
+        // M4 key, per slot (not automatable)
+        layout.add (std::make_unique<AudioParameterChoice> (
+            ParameterID { slotParam (s, slotKeyModeSuffix), 1 }, name + "key mode", StringArray { "Snap", "Original" }, 0, nonAuto));
+        layout.add (std::make_unique<AudioParameterChoice> (
+            ParameterID { slotParam (s, slotDirectionSuffix), 1 }, name + "direction", StringArray { "Nearest", "Up", "Down" }, 0, nonAuto));
+        layout.add (std::make_unique<AudioParameterInt> (
+            ParameterID { slotParam (s, slotTransposeSuffix), 1 }, name + "transpose", -12, 12, 0,
+            AudioParameterIntAttributes().withAutomatable (false).withLabel ("st")));
+        layout.add (std::make_unique<AudioParameterFloat> (
+            ParameterID { slotParam (s, slotFineSuffix), 1 }, name + "fine",
+            NormalisableRange<float> (-50.0f, 50.0f, 1.0f), 0.0f,
+            AudioParameterFloatAttributes().withAutomatable (false).withLabel ("ct")));
     }
 
     return layout;

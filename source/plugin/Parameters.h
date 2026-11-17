@@ -47,15 +47,29 @@ namespace mosaic::params
     inline constexpr const char* slotStartOffsetSuffix = "StartOffset"; // bars, -16..16
     inline constexpr const char* slotLoopSuffix        = "Loop";
 
+    // --- M4: key (SPEC 7). Stored in state, not automatable: changes trigger a re-render. ---
+    inline constexpr const char* keyMode  = "keyMode";    // 0 Auto, 1 Manual
+    inline constexpr const char* keyRoot  = "keyRoot";    // 0..11
+    inline constexpr const char* keyScale = "keyScale";   // 0 Major, 1 Minor
+    inline constexpr const char* slotKeyModeSuffix   = "KeyMode";    // 0 Snap, 1 Original
+    inline constexpr const char* slotDirectionSuffix = "Direction";  // 0 Nearest, 1 Up, 2 Down
+    inline constexpr const char* slotTransposeSuffix = "Transpose";  // semitones -12..12
+    inline constexpr const char* slotFineSuffix      = "Fine";       // cents -50..50
+
     inline juce::String slotParam (int slotIndex, const char* suffix)
     {
         return "slot" + juce::String (slotIndex + 1) + suffix;
     }
 
-    /// dB parameter value to linear gain, with kMinGainDb meaning silence.
+    /// dB parameter value to linear gain, with kMinGainDb meaning silence. Values within
+    /// a thousandth of a dB of 0 are exactly 1.0: a parameter's default 0 dB comes back
+    /// from normalisation as a few millionths of a dB, and 0 dB must be bit-exact
+    /// pass-through (SPEC 7.6: a zero shift leaves the original untouched).
     inline float dbToGain (float db) noexcept
     {
-        return db <= kMinGainDb + 0.01f ? 0.0f : juce::Decibels::decibelsToGain (db);
+        if (db <= kMinGainDb + 0.01f) return 0.0f;
+        if (std::abs (db) < 0.001f)   return 1.0f;
+        return juce::Decibels::decibelsToGain (db);
     }
 
     juce::AudioProcessorValueTreeState::ParameterLayout createLayout();

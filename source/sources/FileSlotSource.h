@@ -28,6 +28,9 @@ public:
     /// arrived and retires the old one. Swaps happen only between blocks.
     void pollIncoming() noexcept;
 
+    /// True if a new buffer is waiting (audio thread may defer the swap to a tile boundary).
+    bool hasIncoming() const noexcept { return ! incoming.empty(); }
+
     bool    isEmpty() const noexcept override         { return current == nullptr || current->numSamples <= 0; }
     bool    isLive() const noexcept override          { return false; }
     int64_t lengthInSamples() const noexcept override { return current != nullptr ? current->numSamples : 0; }

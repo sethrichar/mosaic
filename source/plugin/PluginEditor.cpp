@@ -21,6 +21,12 @@ MosaicAudioProcessorEditor::MosaicAudioProcessorEditor (MosaicAudioProcessor& p)
     reroll.onClick = [this] { mosaicProcessor.reroll(); };
     addAndMakeVisible (reroll);
 
+    addCombo (keyMode, params::keyMode, "Key");
+    addCombo (keyRoot, params::keyRoot, "");
+    addCombo (keyScale, params::keyScale, "");
+    keyReadout.setFont (juce::FontOptions (13.0f, juce::Font::bold));
+    addAndMakeVisible (keyReadout);
+
     for (int s = 0; s < MosaicAudioProcessor::kNumSlots; ++s)
     {
         rows[s] = std::make_unique<ui::SlotRow> (mosaicProcessor, s,
@@ -59,8 +65,8 @@ MosaicAudioProcessorEditor::MosaicAudioProcessorEditor (MosaicAudioProcessor& p)
     }
 
     setResizable (true, true);
-    setResizeLimits (900, 640, 2400, 1600);
-    setSize (1040, 760);
+    setResizeLimits (1100, 760, 2600, 1800);
+    setSize (1240, 960);
     startTimerHz (30);
 }
 
@@ -134,6 +140,10 @@ void MosaicAudioProcessorEditor::resized()
     placeSlider (row, fade, 40, 180);
     placeSlider (row, tileLength, 56, 180);
     placeSlider (row, outputGain, 50, 180);
+    placeCombo (row, keyMode, 36, 80);
+    placeCombo (row, keyRoot, 0, 56);
+    placeCombo (row, keyScale, 0, 76);
+    keyReadout.setBounds (row.removeFromLeft (220));
     if (mosaicProcessor.usesStandaloneTransport())
     {
         row.removeFromLeft (10);
@@ -226,6 +236,19 @@ void MosaicAudioProcessorEditor::timerCallback()
     memoryLabel.setColour (juce::Label::textColourId,
         mosaicProcessor.totalFileBytes() > MosaicAudioProcessor::kMemoryWarningBytes ? juce::Colours::orange : juce::Colours::lightgrey);
 
+    {
+        const int keyIdx = t.effectiveKeyIndex.load();
+        const int src = t.effectiveKeySourceSlot.load();
+        juce::String k = keyIdx >= 0 ? "Key: " + analysis::Key::fromIndex (keyIdx).name() : "Key: none";
+        if (keyIdx >= 0 && src >= 0) k += "  (auto, from slot " + juce::String (src + 1) + ")";
+        else if (keyIdx >= 0)        k += "  (manual)";
+        else                          k += "  (nothing to snap to)";
+        keyReadout.setText (k, juce::dontSendNotification);
+        const bool manual = keyMode.box.getSelectedItemIndex() == 1;
+        keyRoot.box.setEnabled (manual);
+        keyScale.box.setEnabled (manual);
+    }
+
     juce::String s;
     s << (t.hasPlayhead.load() ? "" : "no playhead  ")
       << (t.isPlaying.load() ? "PLAYING" : "stopped")
@@ -235,7 +258,9 @@ void MosaicAudioProcessorEditor::timerCallback()
       << "  bpm " << (t.hasBpm.load() ? juce::String (t.bpm.load(), 1) : "n/a")
       << "  sr " << t.sampleRate.load() << "  block " << t.blockSize.load()
       << "  " << (t.engineActive.load() ? "engine" : (mosaicProcessor.state().getRawParameterValue (params::role)->load() > 0.5f ? "SEND role" : "probe"))
-      << "  latency " << mosaicProcessor.getLatencySamples();
+      << "  latency " << mosaicProcessor.getLatencySamples()
+      << (mosaicProcessor.isBusy() ? "  [working]" : "")
+      << (t.offlineWaitsMs.load() > 0 ? "  offline waits " + juce::String (t.offlineWaitsMs.load()) + " ms" : "");
     if (! t.engineActive.load() && t.sendReads.load() > 0)
         s << "  underruns " << t.sendUnderruns.load() << "  need " << t.neededLookBehind.load();
     statusLabel.setText (s, juce::dontSendNotification);

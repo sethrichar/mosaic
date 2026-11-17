@@ -4,6 +4,59 @@ Every tag gets an entry: what changed, what was decided, and how to get back to 
 previous version. Working builds use decimal versions (v0.1, v0.2 …); only builds handed
 to other people get whole numbers (v1, v2 …). See `CLAUDE.md`, "Version control rules".
 
+## v0.5 — 2026-11-16 — M4: key detection and snap-to-key
+
+**What changed**
+- `source/analysis/` (plain C++, no plugin or JUCE dependencies):
+  - `Key`, `KeySnap`: signature-based snap math (SPEC 7.4) with Nearest / Up / Down,
+    Transpose and Fine; key-name parsing for sample-pack file names. Tested over all
+    24 × 24 key pairs.
+  - `KeyDetector`: in-house. Mono downmix → lowpass + decimate to ~12 kHz → 8192-point
+    Hann STFT → spectral peaks → tuning estimate → 12-bin chroma (bass-weighted) →
+    correlation with 24 rotated Temperley profiles (Krumhansl-Kessler selectable).
+    Confidence = strength × margin over the best non-relative rival; "none" below a
+    tonalness floor. Synthetic tests: 24/24 chord progressions exact and High, 24/24 scale
+    runs on the right signature, noise and drum bursts never High.
+  - `PitchShifter` interface with `SignalsmithPitchShifter` (Signalsmith Stretch 1.4.0,
+    MIT, plus Signalsmith Linear 0.6.4, both pinned submodules). 8192/1024 analysis
+    blocks: a 440 Hz sine at +3 semitones measures within 0.5 cents; clicks stay within
+    1 ms; output length is exact; shift 0 is bit-identical; renders are deterministic
+    (fixed seed).
+- Pipeline (`FileLoader` is now a load / detect / render worker): import → resample →
+  detect → decide shift → render if non-zero → publish. Superseded jobs are cancelled.
+  A newly imported slot stays silent until its buffer is ready. Re-renders re-read the
+  file from disk so only the played buffer stays in RAM. Rapid changes debounce (300 ms).
+- Swaps at tile boundaries: a new buffer replaces the old one only when its slot is not
+  sounding (and past the crossfade tail), or after ~2 s if it never goes quiet, or at once
+  when stopped. Offline bounce: `processBlock` waits (bounded, 30 s) for pending work —
+  the sanctioned exception in CLAUDE.md.
+- Global Key: Auto (lowest-numbered slot with a confident or user-set source key) or
+  Manual. Per slot: Key mode (Snap / Original; import default Snap when confident),
+  Direction, Transpose (±12), Fine (±50 cents), source-key override. None automatable.
+- State version **3**: key data per slot (detected key, confidence, tuning, override) in
+  the files tree. Restoring never re-detects.
+- Placeholder UI: global Key controls and readout; per slot a key badge (dimmed when
+  low confidence, "no key", "(set)" for overrides), source-key menu, Snap/Original,
+  Direction, Transpose, Fine, shift readout with "(pending)", render progress.
+- `tools/keydetect`: scores a folder against `keys.csv` / file-name keys; prints exact
+  and same-signature rates, misses, and label-vs-detector disagreements.
+- Tests: 57 plain + 17 plugin (key snap, detector, shifter, pipeline, offline wait,
+  RAM after render, state).
+
+**Decisions**
+- Detector profiles: Temperley with bass emphasis, chosen by the experiment test
+  (`[experiment]` tag) over Krumhansl-Kessler and other weightings.
+- Shifter block size traded for pitch accuracy (±2 cents) over transient sharpness;
+  Seth judges the audible result at the M4 checkpoint. Formant correction is available
+  in the library and stays parked until he asks for it.
+- Low-confidence detections still snap if the user turns Snap on; "none" never snaps.
+
+**Still open**
+- Detector accuracy on Seth's real set (`test-audio/key-set/`): no files yet. Target is
+  ≥ 75 % same-signature on pitched files and no unpitched file at High confidence.
+
+**Previous version:** `v0.4` (`git checkout v0.4`).
+
 ## v0.4 — 2026-11-16 — M3: file mosaic (first playable build)
 
 **What changed**
