@@ -7,6 +7,10 @@ include(Catch)
 add_executable(mosaic_tests
     test_engine_info.cpp
     test_send_hub.cpp
+    test_grid_clock.cpp
+    test_step_chooser.cpp
+    test_slice_position.cpp
+    test_tile_renderer.cpp
 )
 target_link_libraries(mosaic_tests PRIVATE
     mosaic_engine

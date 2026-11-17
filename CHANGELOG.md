@@ -4,6 +4,36 @@ Every tag gets an entry: what changed, what was decided, and how to get back to 
 previous version. Working builds use decimal versions (v0.1, v0.2 …); only builds handed
 to other people get whole numbers (v1, v2 …). See `CLAUDE.md`, "Version control rules".
 
+## v0.3 — 2026-11-16 — M2: engine core (headless)
+
+**What changed**
+- `source/engine/` is now the mosaic brain, plain C++ with no JUCE: `Rate` (18 grid
+  rates), `GridClock` (sample-exact step boundaries, snap epsilon 1e-6 samples),
+  `StepChooser` (weighted seeded random with pattern length and stateless avoid-repeats;
+  sequence mode with rests and "?"), `SlotSource` interface, `SlicePosition` (Locked with
+  start offset and loop, Free with hashed slices), `TileRenderer` (one tile at a time,
+  crossfade at every edge, gate, same-slot seamless join in Locked mode).
+- The renderer is stateless with respect to the timeline: the output of any sample is a
+  pure function of host time and configuration, so block splits, locates and offline
+  bounces render bit-identically. Blocks larger than `prepare()` are chunked.
+- 31 engine tests (`tests/test_grid_clock.cpp`, `test_step_chooser.cpp`,
+  `test_slice_position.cpp`, `test_tile_renderer.cpp`), covering every M2 acceptance
+  check: boundaries at 44.1/48/96 kHz, odd tempos, block sizes 1–4096; bars 5–8 alone
+  equal bars 1–8; weights within 3% over 10,000 steps; muted/empty never chosen;
+  click bound at every tile edge; variable block sizes bit-identical.
+- `tools/engine_demo`: renders a test-tone mosaic to a WAV without a host.
+
+**Decisions**
+- Avoid-repeats is stateless by walking a chain that restarts every 64 steps; a repeat
+  can only slip through at a restart point. Exact enough, and seekable.
+- Crossfades are linear and clamped to half of either neighbouring step. A gated tile
+  (< 100%) fades out inside its own step instead of crossfading into the next one.
+- Live sources read "now" in both position modes; Free mode falls back to Locked.
+- Pattern length and start offset in bars are converted to steps/samples by the plugin
+  layer (M3) using the host time signature; the engine only sees steps and samples.
+
+**Previous version:** `v0.2` (`git checkout v0.2`).
+
 ## v0.2 — 2026-11-16 — M1: routing spike (probe build)
 
 **What changed**
