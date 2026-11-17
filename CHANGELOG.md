@@ -4,6 +4,50 @@ Every tag gets an entry: what changed, what was decided, and how to get back to 
 previous version. Working builds use decimal versions (v0.1, v0.2 …); only builds handed
 to other people get whole numbers (v1, v2 …). See `CLAUDE.md`, "Version control rules".
 
+## v0.4 — 2026-11-16 — M3: file mosaic (first playable build)
+
+**What changed**
+- **It plays.** Drop up to 8 files on the slots, press play in the host, and the engine
+  switches between them on the grid. Random mode with all SPEC 4.6/4.7 controls except
+  the key controls (M4) and the slot Source selector (M5).
+- `source/sources/FileSlotSource` (plain C++): the audio thread owns the current buffer
+  outright; new buffers arrive through a lock-free queue and old ones go back through
+  another, so nothing is allocated, freed or shared across threads on the audio thread.
+  Superseded buffers that never reached the audio thread are dropped immediately.
+- `source/sources/FileLoader` (JUCE): background thread decodes WAV/AIFF/FLAC/MP3/
+  CoreAudio formats, keeps the first two channels (mono to both), resamples once to the
+  session rate with a windowed-sinc interpolator, builds a 1024-bin waveform overview,
+  delivers on the message thread. Stale results (slot reloaded meanwhile) are dropped.
+  Files are re-resampled automatically when the session sample rate changes.
+- Parameters: `rate`, `mode`, `position`, `fade`, `tileLength`, `seed`, `patternLength`,
+  `avoidRepeats`, `outputGain`, and per slot `slotNGain`, `slotNMute`, `slotNWeight`,
+  `slotNStartOffset` (bars), `slotNLoop`. Pattern length and start offset use the host
+  time signature. The M1 probe parameters remain; `probeSource` now defaults to None,
+  which means "the engine".
+- State version **2**: parameters plus a `files` child with each slot's absolute path.
+  A missing file restores as "MISSING — relink" on that slot; other slots load normally.
+  Version 1 state still loads.
+- Standalone build: a simple transport (Play/Stop, Rewind, BPM) feeds the engine when
+  there is no host playhead (SPEC 4.1).
+- Placeholder UI (not the M7 design): global controls, Reroll, 8 slot rows with Load /
+  Clear / drop target, waveform overview with playhead, active light, per-slot gain /
+  mute / weight / offset / loop; memory readout with the 1 GB warning; status line; the
+  M1 probe controls in the bottom strip. Dropping several files fills consecutive slots.
+- Tests: `test_file_slot_source.cpp` (queue hand-off, replacement, concurrent
+  publish/read), `test_plugin_mosaic.cpp` (loader decode/downmix/resample, state round
+  trip with identical renders, missing file, offline bounce and variable block
+  bit-identity, mute and gain). `test_plugin_routing.cpp` rigs now use distinct Send
+  channels so they are independent in one process.
+
+**Decisions**
+- A replaced file swaps at a block boundary, not a tile boundary; replacing a file is a
+  user action and a crossfade is not expected. Tile-boundary swaps are M4 (renders).
+- Sequence mode is selectable but its lane is not editable until M6 (default: slots 1–8
+  in order).
+- The probe (M1) stays in the build until M5 so the null test can be repeated.
+
+**Previous version:** `v0.3` (`git checkout v0.3`).
+
 ## v0.3 — 2026-11-16 — M2: engine core (headless)
 
 **What changed**

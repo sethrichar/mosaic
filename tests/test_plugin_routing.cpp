@@ -64,8 +64,17 @@ namespace
         static constexpr int kBlock = 256;
         static constexpr double kRate = 48000.0;
 
+        // The hub is process-wide: every rig takes a fresh Send channel in Group B so
+        // data from an earlier test case can never satisfy a later read.
+        static int nextSend()
+        {
+            static int counter = 0;
+            return counter++ % 8;
+        }
+
         Rig (int lookBehindSamples)
         {
+            const int sendIndex = nextSend();
             for (auto* p : { &send, &mosaic })
             {
                 p->setPlayHead (&playhead);
@@ -74,10 +83,10 @@ namespace
             }
             setChoice (send, params::role, 1);
             setChoice (send, params::sendGroup, 1);          // Group B, to stay clear of other tests
-            setChoice (send, params::sendNumber, 2);         // Send 3
+            setChoice (send, params::sendNumber, sendIndex);
             setChoice (mosaic, params::role, 0);
             setChoice (mosaic, params::sendGroup, 1);
-            setChoice (mosaic, params::probeSource, params::probeSourceSend + 2);
+            setChoice (mosaic, params::probeSource, params::probeSourceSend + sendIndex);
             setChoice (mosaic, params::probeLookBehind, lookBehindIndexFor (lookBehindSamples));
         }
 
@@ -275,6 +284,7 @@ TEST_CASE ("mono main input is copied to both outputs", "[routing][buses]")
     REQUIRE (p.setBusesLayout (layout));
     p.setRateAndBufferSizeDetails (48000.0, 32);
     p.prepareToPlay (48000.0, 32);
+    setChoice (p, params::probeSource, params::probeSourceInput);   // probe Input 1 (the engine is the default since M3)
 
     juce::AudioBuffer<float> buf (2, 32);
     buf.clear();

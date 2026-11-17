@@ -46,6 +46,15 @@ public:
     /// Advance a block description by n samples (used when a render is chunked).
     static HostBlock advanced (const HostBlock& b, int n) noexcept;
 
+    /// Quarter notes in one bar of the given time signature (4/4 -> 4, 6/8 -> 3, 7/8 -> 3.5).
+    static double quarterNotesPerBar (int numerator, int denominator) noexcept;
+
+    /// Pattern length in steps for a length in bars (0 = off). At least 1 when on.
+    static int64_t patternLengthSteps (double bars, double quarterNotesPerBar, double stepQN) noexcept;
+
+    /// A start offset in bars as a signed sample count.
+    static int64_t barsToSamples (double bars, double quarterNotesPerBar, double samplesPerQuarter) noexcept;
+
     static constexpr double kSnapEpsilonSamples = 1e-6;
 };
 

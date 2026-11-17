@@ -29,6 +29,24 @@ int64_t GridClock::stepLengthSamples (const HostBlock& b, double stepQN, int64_t
     return len < 1 ? 1 : len;
 }
 
+double GridClock::quarterNotesPerBar (int numerator, int denominator) noexcept
+{
+    if (numerator <= 0 || denominator <= 0) return 4.0;
+    return (double) numerator * 4.0 / (double) denominator;
+}
+
+int64_t GridClock::patternLengthSteps (double bars, double qnPerBar, double stepQN) noexcept
+{
+    if (bars <= 0.0 || stepQN <= 0.0) return 0;
+    const int64_t steps = (int64_t) std::llround (bars * qnPerBar / stepQN);
+    return steps < 1 ? 1 : steps;
+}
+
+int64_t GridClock::barsToSamples (double bars, double qnPerBar, double spq) noexcept
+{
+    return (int64_t) std::llround (bars * qnPerBar * spq);
+}
+
 HostBlock GridClock::advanced (const HostBlock& b, int n) noexcept
 {
     HostBlock a = b;

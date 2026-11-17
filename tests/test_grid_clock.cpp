@@ -110,3 +110,22 @@ TEST_CASE ("advancing a block keeps boundaries identical", "[grid]")
     for (int64_t k = -3; k < 400; ++k)
         REQUIRE (GridClock::boundaryTimeline (a, stepQN, k) == GridClock::boundaryTimeline (b, stepQN, k));
 }
+
+TEST_CASE ("bars convert to steps and samples using the host time signature", "[grid]")
+{
+    REQUIRE (GridClock::quarterNotesPerBar (4, 4) == 4.0);
+    REQUIRE (GridClock::quarterNotesPerBar (6, 8) == 3.0);
+    REQUIRE (GridClock::quarterNotesPerBar (7, 8) == 3.5);
+    REQUIRE (GridClock::quarterNotesPerBar (0, 0) == 4.0);
+
+    REQUIRE (GridClock::patternLengthSteps (0, 4.0, 0.25) == 0);           // off
+    REQUIRE (GridClock::patternLengthSteps (1, 4.0, 0.25) == 16);          // 1 bar of 1/16
+    REQUIRE (GridClock::patternLengthSteps (2, 3.0, 0.5) == 12);           // 2 bars of 6/8 in 1/8
+    REQUIRE (GridClock::patternLengthSteps (1, 4.0, 0.75) == 5);           // dotted 1/8: 5.33 -> 5
+    REQUIRE (GridClock::patternLengthSteps (1, 4.0, 4.0) == 1);
+
+    const double spq = 48000.0 * 60.0 / 120.0;                             // 24000
+    REQUIRE (GridClock::barsToSamples (1.0, 4.0, spq) == 96000);
+    REQUIRE (GridClock::barsToSamples (-0.5, 4.0, spq) == -48000);
+    REQUIRE (GridClock::barsToSamples (0.25, 3.0, spq) == 18000);
+}

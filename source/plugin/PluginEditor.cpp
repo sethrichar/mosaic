@@ -7,28 +7,60 @@ namespace mosaic
 MosaicAudioProcessorEditor::MosaicAudioProcessorEditor (MosaicAudioProcessor& p)
     : AudioProcessorEditor (&p), mosaicProcessor (p)
 {
-    addCombo (role,        params::role,            "Role");
-    addCombo (group,       params::sendGroup,       "Group");
-    addCombo (sendNumber,  params::sendNumber,      "Send #");
-    addCombo (probeSource, params::probeSource,     "Probe source");
-    addCombo (lookBehind,  params::probeLookBehind, "Look-behind");
+    addCombo (rate, params::rate, "Rate");
+    addCombo (mode, params::mode, "Mode");
+    addCombo (position, params::position, "Position");
+    addCombo (patternLength, params::patternLength, "Pattern");
+    addSlider (fade, params::fade, "Fade");
+    addSlider (tileLength, params::tileLength, "Tile len");
+    addSlider (seed, params::seed, "Seed");
+    addSlider (outputGain, params::outputGain, "Output");
 
-    addAndMakeVisible (muteOutput);
-    muteAttachment = std::make_unique<ButtonAttachment> (mosaicProcessor.state(), params::sendMuteOutput, muteOutput);
+    addAndMakeVisible (avoidRepeats);
+    avoidRepeatsAtt = std::make_unique<ButtonAttachment> (mosaicProcessor.state(), params::avoidRepeats, avoidRepeats);
+    reroll.onClick = [this] { mosaicProcessor.reroll(); };
+    addAndMakeVisible (reroll);
 
-    addAndMakeVisible (resetStats);
+    for (int s = 0; s < MosaicAudioProcessor::kNumSlots; ++s)
+    {
+        rows[s] = std::make_unique<ui::SlotRow> (mosaicProcessor, s,
+            [this] (int slot) { openFileChooser (slot); },
+            [this] (int slot) { mosaicProcessor.clearSlot (slot); });
+        addAndMakeVisible (*rows[s]);
+    }
+
+    memoryLabel.setFont (juce::FontOptions (12.0f));
+    addAndMakeVisible (memoryLabel);
+    statusLabel.setFont (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 11.0f, juce::Font::plain));
+    statusLabel.setColour (juce::Label::textColourId, juce::Colours::grey);
+    addAndMakeVisible (statusLabel);
+
+    addCombo (role, params::role, "Role");
+    addCombo (probeSource, params::probeSource, "Probe");
+    addCombo (lookBehind, params::probeLookBehind, "Look-behind");
     resetStats.onClick = [this] { mosaicProcessor.telemetry().resetStatsRequest.store (true); };
+    addAndMakeVisible (resetStats);
 
-    readout.setMultiLine (true);
-    readout.setReadOnly (true);
-    readout.setCaretVisible (false);
-    readout.setFont (juce::FontOptions (juce::Font::getDefaultMonospacedFontName(), 12.0f, juce::Font::plain));
-    readout.setColour (juce::TextEditor::backgroundColourId, juce::Colour (0xff151515));
-    addAndMakeVisible (readout);
+    if (mosaicProcessor.usesStandaloneTransport())
+    {
+        auto& tr = mosaicProcessor.standaloneTransport();
+        playButton.setClickingTogglesState (true);
+        playButton.onClick = [this, &tr] { tr.playing.store (playButton.getToggleState()); playButton.setButtonText (playButton.getToggleState() ? "Stop" : "Play"); };
+        rewindButton.onClick = [&tr] { tr.rewind(); };
+        bpmSlider.setRange (40.0, 240.0, 0.1);
+        bpmSlider.setValue (tr.bpm.load(), juce::dontSendNotification);
+        bpmSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 60, 18);
+        bpmSlider.onValueChange = [this, &tr] { tr.bpm.store (bpmSlider.getValue()); };
+        bpmLabel.setText ("BPM", juce::dontSendNotification);
+        addAndMakeVisible (playButton);
+        addAndMakeVisible (rewindButton);
+        addAndMakeVisible (bpmSlider);
+        addAndMakeVisible (bpmLabel);
+    }
 
     setResizable (true, true);
-    setResizeLimits (640, 480, 2000, 1400);
-    setSize (760, 560);
+    setResizeLimits (900, 640, 2400, 1600);
+    setSize (1040, 760);
     startTimerHz (30);
 }
 
@@ -40,186 +72,173 @@ MosaicAudioProcessorEditor::~MosaicAudioProcessorEditor()
 void MosaicAudioProcessorEditor::addCombo (ParamCombo& c, const char* paramId, const juce::String& text)
 {
     c.label.setText (text, juce::dontSendNotification);
-    c.label.setJustificationType (juce::Justification::centredLeft);
+    c.label.setFont (juce::FontOptions (12.0f));
+    c.label.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (c.label);
-
     if (auto* choiceParam = dynamic_cast<juce::AudioParameterChoice*> (mosaicProcessor.state().getParameter (paramId)))
         c.box.addItemList (choiceParam->choices, 1);
-
     addAndMakeVisible (c.box);
     c.attachment = std::make_unique<ComboAttachment> (mosaicProcessor.state(), paramId, c.box);
 }
 
+void MosaicAudioProcessorEditor::addSlider (ParamSlider& s, const char* paramId, const juce::String& text)
+{
+    s.label.setText (text, juce::dontSendNotification);
+    s.label.setFont (juce::FontOptions (12.0f));
+    s.label.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (s.label);
+    s.slider.setSliderStyle (juce::Slider::LinearHorizontal);
+    s.slider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 64, 18);
+    addAndMakeVisible (s.slider);
+    s.attachment = std::make_unique<SliderAttachment> (mosaicProcessor.state(), paramId, s.slider);
+}
+
 void MosaicAudioProcessorEditor::paint (juce::Graphics& g)
 {
-    g.fillAll (juce::Colour (0xff1e1e1e));
+    g.fillAll (juce::Colour (0xff1a1a1a));
     g.setColour (juce::Colours::white);
     g.setFont (juce::FontOptions (18.0f, juce::Font::bold));
-    g.drawText (juce::String ("Mosaic routing probe  v") + MOSAIC_VERSION_STRING,
-                getLocalBounds().removeFromTop (30).reduced (12, 0), juce::Justification::centredLeft);
-    drawMeters (g, meterArea);
+    g.drawText (juce::String ("Mosaic  v") + MOSAIC_VERSION_STRING + "  (M3 placeholder UI)",
+                getLocalBounds().removeFromTop (28).reduced (12, 0), juce::Justification::centredLeft);
 }
 
 void MosaicAudioProcessorEditor::resized()
 {
-    auto area = getLocalBounds().reduced (12);
-    area.removeFromTop (30);
+    auto area = getLocalBounds().reduced (10);
+    area.removeFromTop (28);
 
-    auto row = area.removeFromTop (26);
-    auto place = [&row] (ParamCombo& c, int labelW, int boxW)
+    auto placeCombo = [] (juce::Rectangle<int>& row, ParamCombo& c, int labelW, int boxW)
     {
         c.label.setBounds (row.removeFromLeft (labelW));
         c.box.setBounds (row.removeFromLeft (boxW).reduced (0, 2));
         row.removeFromLeft (8);
     };
-    place (role, 40, 90);
-    place (group, 48, 60);
-    place (sendNumber, 52, 90);
-    muteOutput.setBounds (row.removeFromLeft (170));
-
-    area.removeFromTop (6);
-    row = area.removeFromTop (26);
-    place (probeSource, 90, 110);
-    place (lookBehind, 84, 90);
-    resetStats.setBounds (row.removeFromLeft (100).reduced (0, 2));
-
-    area.removeFromTop (10);
-    meterArea = area.removeFromTop (150);
-    area.removeFromTop (10);
-    readout.setBounds (area);
-}
-
-void MosaicAudioProcessorEditor::drawMeters (juce::Graphics& g, juce::Rectangle<int> r)
-{
-    auto drawBank = [&g] (juce::Rectangle<int> bank, const juce::String& title, const float* values,
-                          const bool* enabled, int count)
+    auto placeSlider = [] (juce::Rectangle<int>& row, ParamSlider& s, int labelW, int w)
     {
-        g.setColour (juce::Colours::lightgrey);
-        g.setFont (juce::FontOptions (13.0f));
-        g.drawText (title, bank.removeFromTop (18), juce::Justification::centredLeft);
-        const int w = bank.getWidth() / count;
-        for (int i = 0; i < count; ++i)
-        {
-            auto cell = bank.removeFromLeft (w).reduced (3, 0);
-            auto labelArea = cell.removeFromBottom (16);
-            const bool on = enabled == nullptr || enabled[i];
-            g.setColour (on ? juce::Colour (0xff2a2a2a) : juce::Colour (0xff202020));
-            g.fillRect (cell);
-            if (on)
-            {
-                const float db = juce::Decibels::gainToDecibels (values[i], -60.0f);
-                const float frac = juce::jlimit (0.0f, 1.0f, (db + 60.0f) / 60.0f);
-                auto bar = cell.withTop (cell.getBottom() - juce::roundToInt (frac * (float) cell.getHeight()));
-                g.setColour (db > -0.5f ? juce::Colours::red : juce::Colour (0xff4caf50));
-                g.fillRect (bar);
-            }
-            g.setColour (on ? juce::Colours::lightgrey : juce::Colours::darkgrey);
-            g.setFont (juce::FontOptions (11.0f));
-            g.drawText (juce::String (i + 1), labelArea, juce::Justification::centred);
-        }
+        s.label.setBounds (row.removeFromLeft (labelW));
+        s.slider.setBounds (row.removeFromLeft (w));
+        row.removeFromLeft (8);
     };
 
-    const auto& t = mosaicProcessor.telemetry();
-    bool enabled[MosaicAudioProcessor::kNumInputBuses];
-    for (int i = 0; i < MosaicAudioProcessor::kNumInputBuses; ++i)
-        enabled[i] = t.inputEnabled[i].load();
+    auto row = area.removeFromTop (26);
+    placeCombo (row, rate, 40, 80);
+    placeCombo (row, mode, 44, 100);
+    placeCombo (row, position, 60, 90);
+    placeCombo (row, patternLength, 56, 90);
+    avoidRepeats.setBounds (row.removeFromLeft (120));
+    placeSlider (row, seed, 40, 170);
+    reroll.setBounds (row.removeFromLeft (70).reduced (0, 2));
 
-    auto left = r.removeFromLeft (r.getWidth() / 2).reduced (0, 0);
-    r.removeFromLeft (16);
-    drawBank (left, "Native input buses (Input 1-8)", inputMeter, enabled, MosaicAudioProcessor::kNumInputBuses);
-
-    const bool isSend = role.box.getSelectedItemIndex() == 1;
-    if (isSend)
+    area.removeFromTop (4);
+    row = area.removeFromTop (26);
+    placeSlider (row, fade, 40, 180);
+    placeSlider (row, tileLength, 56, 180);
+    placeSlider (row, outputGain, 50, 180);
+    if (mosaicProcessor.usesStandaloneTransport())
     {
-        float v[1] = { sendRoleMeter };
-        drawBank (r.removeFromLeft (60), "This Send", v, nullptr, 1);
+        row.removeFromLeft (10);
+        playButton.setBounds (row.removeFromLeft (60).reduced (0, 2));
+        row.removeFromLeft (4);
+        rewindButton.setBounds (row.removeFromLeft (64).reduced (0, 2));
+        bpmLabel.setBounds (row.removeFromLeft (36));
+        bpmSlider.setBounds (row.removeFromLeft (160));
     }
-    else
-        drawBank (r, "Sends in this group (Send 1-8)", sendMeter, nullptr, hub::kNumSends);
+
+    area.removeFromTop (8);
+    auto bottom = area.removeFromBottom (48);
+    slotArea = area;
+
+    const int rowH = slotArea.getHeight() / MosaicAudioProcessor::kNumSlots;
+    auto slotsRect = slotArea;
+    for (auto& r : rows)
+        r->setBounds (slotsRect.removeFromTop (rowH).reduced (0, 2));
+
+    auto b1 = bottom.removeFromTop (24);
+    memoryLabel.setBounds (b1.removeFromLeft (300));
+    placeCombo (b1, role, 36, 80);
+    placeCombo (b1, probeSource, 44, 90);
+    placeCombo (b1, lookBehind, 76, 80);
+    resetStats.setBounds (b1.removeFromLeft (90).reduced (0, 2));
+    statusLabel.setBounds (bottom);
+}
+
+int MosaicAudioProcessorEditor::slotAt (int y) const
+{
+    if (! slotArea.contains (slotArea.getX(), y)) return -1;
+    const int rowH = juce::jmax (1, slotArea.getHeight() / MosaicAudioProcessor::kNumSlots);
+    return juce::jlimit (0, MosaicAudioProcessor::kNumSlots - 1, (y - slotArea.getY()) / rowH);
+}
+
+void MosaicAudioProcessorEditor::highlightSlot (int slot)
+{
+    if (slot == highlighted) return;
+    highlighted = slot;
+    for (int s = 0; s < MosaicAudioProcessor::kNumSlots; ++s)
+        rows[s]->setDragHighlight (s == slot);
+}
+
+bool MosaicAudioProcessorEditor::isInterestedInFileDrag (const juce::StringArray& files)
+{
+    return files.size() > 0;
+}
+
+void MosaicAudioProcessorEditor::fileDragEnter (const juce::StringArray&, int, int y) { highlightSlot (slotAt (y)); }
+void MosaicAudioProcessorEditor::fileDragMove  (const juce::StringArray&, int, int y) { highlightSlot (slotAt (y)); }
+void MosaicAudioProcessorEditor::fileDragExit  (const juce::StringArray&)             { highlightSlot (-1); }
+
+void MosaicAudioProcessorEditor::filesDropped (const juce::StringArray& files, int, int y)
+{
+    highlightSlot (-1);
+    int slot = slotAt (y);
+    if (slot < 0) return;
+    // Several files dropped at once fill consecutive slots.
+    for (const auto& path : files)
+    {
+        if (slot >= MosaicAudioProcessor::kNumSlots) break;
+        mosaicProcessor.loadFile (slot++, juce::File (path));
+    }
+}
+
+void MosaicAudioProcessorEditor::openFileChooser (int slot)
+{
+    chooser = std::make_unique<juce::FileChooser> ("Load audio into slot " + juce::String (slot + 1),
+                                                   juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+                                                   "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.m4a;*.ogg");
+    chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+        [this, slot] (const juce::FileChooser& fc)
+        {
+            const auto f = fc.getResult();
+            if (f.existsAsFile())
+                mosaicProcessor.loadFile (slot, f);
+        });
 }
 
 void MosaicAudioProcessorEditor::timerCallback()
 {
+    for (auto& r : rows) r->refresh();
+
     const auto& t = mosaicProcessor.telemetry();
-    const double nowMs = juce::Time::getMillisecondCounterHiRes();
-
-    auto smooth = [] (float& m, float v) { m = v > m ? v : m * 0.85f; };
-    for (int i = 0; i < MosaicAudioProcessor::kNumInputBuses; ++i) smooth (inputMeter[i], t.inputPeak[i].load());
-    for (int i = 0; i < hub::kNumSends; ++i)                       smooth (sendMeter[i], t.sendPeak[i].load());
-    smooth (sendRoleMeter, t.sendRolePeak.load());
-
-    // processBlock call rate — the "is the host still calling us?" readout (M1 task 6).
-    const uint64_t blocks = t.blockCounter.load();
-    if (blocks != lastBlockCounter)
-        lastBlockSeenMs = nowMs;
-    if (nowMs - lastBlockTimeMs >= 500.0)
-    {
-        blocksPerSecond = (double) (blocks - lastBlockCounter) * 1000.0 / juce::jmax (1.0, nowMs - lastBlockTimeMs);
-        lastBlockCounter = blocks;
-        lastBlockTimeMs = nowMs;
-    }
-    const bool beingCalled = (nowMs - lastBlockSeenMs) < 500.0;
-
-    const uint64_t collisions = t.collisionCount.load();
-    if (collisions != lastCollisionCount) { lastCollisionCount = collisions; lastCollisionMs = nowMs; }
-    const bool collidingNow = (nowMs - lastCollisionMs) < 2000.0;
-
-    const bool isSend = role.box.getSelectedItemIndex() == 1;
-    const auto groupName = juce::String::charToString ((juce::juce_wchar) ('A' + group.box.getSelectedItemIndex()));
-    const auto sendName  = juce::String (sendNumber.box.getSelectedItemIndex() + 1);
+    const double mb = (double) mosaicProcessor.totalFileBytes() / (1024.0 * 1024.0);
+    juce::String mem = "Files in RAM: " + juce::String (mb, 1) + " MB";
+    if (mosaicProcessor.totalFileBytes() > MosaicAudioProcessor::kMemoryWarningBytes)
+        mem += "   *** over 1 GB ***";
+    memoryLabel.setText (mem, juce::dontSendNotification);
+    memoryLabel.setColour (juce::Label::textColourId,
+        mosaicProcessor.totalFileBytes() > MosaicAudioProcessor::kMemoryWarningBytes ? juce::Colours::orange : juce::Colours::lightgrey);
 
     juce::String s;
-    s << "Role: " << (isSend ? "SEND" : "MOSAIC") << "   Group " << groupName << "   Send " << sendName
-      << "   instance id " << mosaicProcessor.instanceId() << "   engine " << engine::versionString() << "\n\n";
-
-    s << "Host:      sampleRate " << t.sampleRate.load()
-      << "   block " << t.blockSize.load() << " (prepared " << t.preparedBlockSize.load()
-      << ", max seen " << t.maxBlockSize.load() << ")"
-      << "   offline " << (t.isOffline.load() ? "YES" : "no") << "\n";
-    s << "processBlock: " << (beingCalled ? "BEING CALLED" : "*** NOT BEING CALLED ***")
-      << "   " << juce::String (blocksPerSecond, 1) << " calls/s   total " << blocks << "\n\n";
-
-    s << "Playhead:  " << (t.hasPlayhead.load() ? "present" : "*** MISSING ***")
-      << "   playing " << (t.isPlaying.load() ? "YES" : "no")
-      << "   timeInSamples " << (t.hasTimeInSamples.load() ? juce::String (t.timeInSamples.load()) : "n/a")
-      << "   ppq " << (t.hasPpq.load() ? juce::String (t.ppq.load(), 3) : "n/a")
-      << "   bpm " << (t.hasBpm.load() ? juce::String (t.bpm.load(), 2) : "n/a") << "\n\n";
-
-    if (isSend)
-    {
-        const auto& ch = hub::SendHub::instance().channel (group.box.getSelectedItemIndex(), sendNumber.box.getSelectedItemIndex());
-        s << "Send:      writing to Group " << groupName << " / Send " << sendName
-          << "   head " << (ch.head() == hub::kNoHead ? juce::String ("none") : juce::String (ch.head()))
-          << "   owner id " << ch.owner() << "\n";
-        s << "Collisions on this channel: " << collisions
-          << (collidingNow ? "   *** ANOTHER SEND IS WRITING TO THIS GROUP/NUMBER ***" : "") << "\n";
-    }
-    else
-    {
-        const int src = probeSource.box.getSelectedItemIndex();
-        s << "Probe:     source " << probeSource.box.getText()
-          << "   look-behind " << lookBehind.box.getText() << " samples"
-          << "   reported latency " << mosaicProcessor.getLatencySamples() << " samples\n";
-        if (src >= params::probeSourceSend)
-        {
-            s << "Send skew (head - T):  last " << (t.skewValid.load() ? juce::String (t.skewLast.load()) : "n/a")
-              << "   min " << (t.skewValid.load() ? juce::String (t.skewMin.load()) : "n/a")
-              << "   max " << (t.skewValid.load() ? juce::String (t.skewMax.load()) : "n/a") << "\n";
-            s << "Smallest look-behind with no underruns so far: " << t.neededLookBehind.load()
-              << " samples   (block " << t.blockSize.load() << ")\n";
-            s << "Send reads " << t.sendReads.load() << "   underruns " << t.sendUnderruns.load()
-              << (t.sendUnderruns.load() > 0 ? "   *** UNDERRUNS: look-behind too small or no Send ***" : "") << "\n";
-            s << "Collisions on that channel: " << collisions
-              << (collidingNow ? "   *** TWO SENDS ON THE SAME GROUP/NUMBER ***" : "") << "\n";
-        }
-    }
-
-    s << "\nInput buses enabled: ";
-    for (int i = 0; i < MosaicAudioProcessor::kNumInputBuses; ++i)
-        s << (t.inputEnabled[i].load() ? juce::String (i + 1) : juce::String ("-")) << " ";
-
-    readout.setText (s, false);
-    repaint (meterArea);
+    s << (t.hasPlayhead.load() ? "" : "no playhead  ")
+      << (t.isPlaying.load() ? "PLAYING" : "stopped")
+      << "  step " << t.stepIndex.load()
+      << "  slot " << (t.activeSlot.load() >= 0 ? juce::String (t.activeSlot.load() + 1) : "-")
+      << "  ppq " << (t.hasPpq.load() ? juce::String (t.ppq.load(), 2) : "n/a")
+      << "  bpm " << (t.hasBpm.load() ? juce::String (t.bpm.load(), 1) : "n/a")
+      << "  sr " << t.sampleRate.load() << "  block " << t.blockSize.load()
+      << "  " << (t.engineActive.load() ? "engine" : (mosaicProcessor.state().getRawParameterValue (params::role)->load() > 0.5f ? "SEND role" : "probe"))
+      << "  latency " << mosaicProcessor.getLatencySamples();
+    if (! t.engineActive.load() && t.sendReads.load() > 0)
+        s << "  underruns " << t.sendUnderruns.load() << "  need " << t.neededLookBehind.load();
+    statusLabel.setText (s, juce::dontSendNotification);
 }
 
 } // namespace mosaic
