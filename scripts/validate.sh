@@ -3,43 +3,52 @@
 #
 # Usage: scripts/validate.sh [strictness]   (pluginval strictness 1-10, default 10)
 #   PLUGINVAL  path to the pluginval binary (default: /Applications/pluginval.app/...)
+#   MOSAIC_VALIDATE_INST_PROBE=0 to skip the M1 instrument-variant probe
 
 set -euo pipefail
 
 STRICTNESS="${1:-10}"
 PLUGINVAL="${PLUGINVAL:-/Applications/pluginval.app/Contents/MacOS/pluginval}"
-AU="$HOME/Library/Audio/Plug-Ins/Components/Mosaic.component"
-VST3="$HOME/Library/Audio/Plug-Ins/VST3/Mosaic.vst3"
+COMPONENTS="$HOME/Library/Audio/Plug-Ins/Components"
+VST3S="$HOME/Library/Audio/Plug-Ins/VST3"
 
-# Plugin identity (CLAUDE.md / SPEC section 8). Type is aufx until M1 decides otherwise.
-AU_TYPE="aufx"
-AU_SUBTYPE="Mosc"
-AU_MANUF="Rmsl"
+# name | AU type | AU subtype | manufacturer   (CLAUDE.md / SPEC section 8)
+PLUGINS=(
+    "Mosaic|aufx|Mosc|Rmsl"
+)
+if [[ "${MOSAIC_VALIDATE_INST_PROBE:-1}" == "1" ]]; then
+    PLUGINS+=("Mosaic Inst Probe|aumu|MosI|Rmsl")
+fi
 
-fail=0
-
-if [[ ! -d "$AU" ]];   then echo "Missing $AU (run scripts/build.sh)";   exit 1; fi
-if [[ ! -d "$VST3" ]]; then echo "Missing $VST3 (run scripts/build.sh)"; exit 1; fi
 if [[ ! -x "$PLUGINVAL" ]]; then echo "pluginval not found at $PLUGINVAL"; exit 1; fi
 
 echo "==> Refreshing the AU component registry"
 killall -9 AudioComponentRegistrar 2>/dev/null || true
 sleep 1
 
-echo "==> auval -v $AU_TYPE $AU_SUBTYPE $AU_MANUF"
-if auval -strict -v "$AU_TYPE" "$AU_SUBTYPE" "$AU_MANUF"; then
-    echo "auval: PASS"
-else
-    echo "auval: FAIL"; fail=1
-fi
+fail=0
+for entry in "${PLUGINS[@]}"; do
+    IFS='|' read -r name autype subtype manuf <<< "$entry"
+    AU="$COMPONENTS/$name.component"
+    VST3="$VST3S/$name.vst3"
+    if [[ ! -d "$AU" ]];   then echo "Missing $AU (run scripts/build.sh)";   fail=1; continue; fi
+    if [[ ! -d "$VST3" ]]; then echo "Missing $VST3 (run scripts/build.sh)"; fail=1; continue; fi
 
-for plugin in "$AU" "$VST3"; do
-    echo "==> pluginval (strictness $STRICTNESS): $plugin"
-    if "$PLUGINVAL" --strictness-level "$STRICTNESS" --skip-gui-tests --validate "$plugin"; then
-        echo "pluginval: PASS ($plugin)"
+    echo "==> auval -strict -v $autype $subtype $manuf   ($name)"
+    if auval -strict -v "$autype" "$subtype" "$manuf"; then
+        echo "auval: PASS ($name)"
     else
-        echo "pluginval: FAIL ($plugin)"; fail=1
+        echo "auval: FAIL ($name)"; fail=1
     fi
+
+    for plugin in "$AU" "$VST3"; do
+        echo "==> pluginval (strictness $STRICTNESS): $plugin"
+        if "$PLUGINVAL" --strictness-level "$STRICTNESS" --skip-gui-tests --validate "$plugin"; then
+            echo "pluginval: PASS ($plugin)"
+        else
+            echo "pluginval: FAIL ($plugin)"; fail=1
+        fi
+    done
 done
 
 if [[ $fail -ne 0 ]]; then

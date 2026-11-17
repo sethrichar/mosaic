@@ -29,6 +29,8 @@ scripts/validate.sh         # auval + pluginval (strictness 10)
 
 `scripts/build.sh Debug` builds a Debug configuration into the same `build/` folder.
 Built plugins are copied to `~/Library/Audio/Plug-Ins/Components` and `.../VST3`.
+During M1 a second plugin, **Mosaic Inst Probe**, is built and installed alongside it
+(disable with `-DMOSAIC_BUILD_INST_PROBE=OFF`).
 
 ## Layout
 
