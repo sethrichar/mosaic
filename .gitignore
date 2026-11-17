@@ -1,0 +1,11 @@
+# Seth's local test audio — never commit (licensed samples, stems)
+test-audio/
+
+# Build output
+build/
+cmake-build-*/
+*.xcworkspace/
+xcuserdata/
+
+# macOS
+.DS_Store
