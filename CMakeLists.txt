@@ -30,6 +30,10 @@ set(MOSAIC_PLAIN_CXX_WARNINGS -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
 # ---------------------------------------------------------------------------
 add_library(mosaic_engine STATIC
     source/engine/EngineInfo.cpp
+    source/engine/GridClock.cpp
+    source/engine/SlicePosition.cpp
+    source/engine/StepChooser.cpp
+    source/engine/TileRenderer.cpp
 )
 target_include_directories(mosaic_engine PUBLIC source)
 target_compile_features(mosaic_engine PUBLIC cxx_std_20)
@@ -132,6 +136,11 @@ if(MOSAIC_BUILD_INST_PROBE)
         VST3_CATEGORIES  Instrument
     )
 endif()
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+add_subdirectory(tools)
 
 # ---------------------------------------------------------------------------
 # Tests
