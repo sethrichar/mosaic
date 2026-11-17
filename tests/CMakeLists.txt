@@ -11,9 +11,10 @@ add_executable(mosaic_tests
     test_step_chooser.cpp
     test_slice_position.cpp
     test_tile_renderer.cpp
+    test_file_slot_source.cpp
 )
 target_link_libraries(mosaic_tests PRIVATE
-    mosaic_engine
+    mosaic_sources   # brings mosaic_engine with it
     mosaic_hub
     Catch2::Catch2WithMain
 )
@@ -28,20 +29,22 @@ juce_add_console_app(mosaic_plugin_tests PRODUCT_NAME "mosaic_plugin_tests")
 
 target_sources(mosaic_plugin_tests PRIVATE
     test_plugin_routing.cpp
-    ${CMAKE_SOURCE_DIR}/source/plugin/Parameters.cpp
-    ${CMAKE_SOURCE_DIR}/source/plugin/PluginProcessor.cpp
-    ${CMAKE_SOURCE_DIR}/source/plugin/PluginEditor.cpp
+    test_plugin_mosaic.cpp
+    ${MOSAIC_PLUGIN_SOURCES_ABS}
 )
 target_include_directories(mosaic_plugin_tests PRIVATE ${CMAKE_SOURCE_DIR}/source)
+set(MOSAIC_TEST_JUCE_DEFINES ${MOSAIC_JUCE_DEFINES})
+list(REMOVE_ITEM MOSAIC_TEST_JUCE_DEFINES JUCE_MODAL_LOOPS_PERMITTED=0)
 target_compile_definitions(mosaic_plugin_tests PRIVATE
-    ${MOSAIC_JUCE_DEFINES}
+    ${MOSAIC_TEST_JUCE_DEFINES}
+    JUCE_MODAL_LOOPS_PERMITTED=1      # tests pump the message queue with runDispatchLoopUntil
     JUCE_STANDALONE_APPLICATION=1
     JucePlugin_Name="Mosaic Test"
     JucePlugin_WantsMidiInput=0
     JucePlugin_IsSynth=0
 )
 target_link_libraries(mosaic_plugin_tests PRIVATE
-    mosaic_engine
+    mosaic_sources
     mosaic_hub
     Catch2::Catch2WithMain
     juce::juce_audio_utils

@@ -5,11 +5,10 @@
 // you played from bar 1 or located straight to it.
 
 #include <cstdint>
+#include "engine/EngineInfo.h"   // kNumSlots
 
 namespace mosaic::engine
 {
-
-inline constexpr int kNumSlots = 8;
 
 enum class ChooseMode : int { Random = 0, Sequence };
 

@@ -40,6 +40,17 @@ target_compile_features(mosaic_engine PUBLIC cxx_std_20)
 target_compile_options(mosaic_engine PRIVATE ${MOSAIC_PLAIN_CXX_WARNINGS})
 
 # ---------------------------------------------------------------------------
+# Sources (plain C++ part): file slot source with lock-free buffer hand-off.
+# ---------------------------------------------------------------------------
+add_library(mosaic_sources STATIC
+    source/sources/FileSlotSource.cpp
+)
+target_include_directories(mosaic_sources PUBLIC source)
+target_compile_features(mosaic_sources PUBLIC cxx_std_20)
+target_compile_options(mosaic_sources PRIVATE ${MOSAIC_PLAIN_CXX_WARNINGS})
+target_link_libraries(mosaic_sources PUBLIC mosaic_engine)
+
+# ---------------------------------------------------------------------------
 # Send hub: plain C++, lock-free inter-instance transport (SPEC 5.3).
 # ---------------------------------------------------------------------------
 add_library(mosaic_hub STATIC
@@ -56,7 +67,14 @@ set(MOSAIC_PLUGIN_SOURCES
     source/plugin/Parameters.cpp
     source/plugin/PluginProcessor.cpp
     source/plugin/PluginEditor.cpp
+    source/sources/FileLoader.cpp
+    source/ui/SlotRow.cpp
 )
+
+set(MOSAIC_PLUGIN_SOURCES_ABS "")
+foreach(src ${MOSAIC_PLUGIN_SOURCES})
+    list(APPEND MOSAIC_PLUGIN_SOURCES_ABS "${CMAKE_SOURCE_DIR}/${src}")
+endforeach()
 
 set(MOSAIC_JUCE_DEFINES
     JUCE_WEB_BROWSER=0
@@ -100,7 +118,7 @@ function(mosaic_add_plugin target)
 
     target_link_libraries(${target}
         PRIVATE
-            mosaic_engine
+            mosaic_sources   # brings mosaic_engine with it
             mosaic_hub
             juce::juce_audio_utils
         PUBLIC
